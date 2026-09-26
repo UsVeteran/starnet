@@ -468,8 +468,9 @@ const App = (() => {
     const m = String(model || '').trim();
     // the hero IS the station default: clearing its pin left a model-less Commander on relaunch — refuse
     if (!m && a.id === 'agent') return false;
-    // a blank provider keeps the hero on its own (else the live) one — a null let relaunch take the save root's
-    const p = String(provider || '').trim() || String((a.id === 'agent' && (a.provider || (typeof Harness !== 'undefined' && Harness.getProv && Harness.getProv()))) || '');
+    // a blank provider pins the hero to the LIVE provider (what the dock shows; else its own saved one) — a null let
+    // relaunch take the save root's, and a stale saved one (after a Settings switch) would mis-route the typed model
+    const p = String(provider || '').trim() || String((a.id === 'agent' && ((typeof Harness !== 'undefined' && Harness.getProv && Harness.getProv()) || a.provider)) || '');
     a.model = m || null;
     a.provider = p || null;
     // effort is OPTIONAL + additive: written only when the 4th arg is passed (older 3-arg callers untouched); a clear also clears it.

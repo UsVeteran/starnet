@@ -19876,15 +19876,15 @@ async function listModelsForProvider(providerId, opts) {
     provider = selectProvider({ provider: id, fetch: globalThis.fetch, key, baseUrl });
   }
   const models = (await provider.listModels()).filter(item => ImageTask.isAgentModel(id, item && item.id));
-  // Reasoning truth for the dock: live openai-compatible rows rarely declare efforts, so publicModel served grok-4.7
-  // as OFF-only and the dock pinned 'none' onto a reasoning model. Where the profile documents `reasoning_effort` on
-  // the wire, fill an undeclared row from the adapter's own per-model list — exactly what its stream() may send.
-  // Profiles without the wire param (kimi, codex, custom…) are served unchanged, and so are a profile that asserts
-  // its models can't reason (Ollama: a non-thinking local model 400s on any effort) and a row the registry declares
-  // non-reasoning (grok-3, sonar) — the dock must never offer MIN..HIGH on a model that rejects them.
+  // Reasoning truth for the dock: a row that provably reasons (supportsReasoning:true — grok's static grok-4) but
+  // declares no efforts was served OFF-only, and the dock pinned 'none' onto a reasoning model. Where the profile
+  // documents `reasoning_effort` on the wire, fill such a row from the adapter's own per-model list — exactly what
+  // its stream() may send. Rows of UNKNOWN capability (gpt-4o-mini, llama, deepseek-chat on keyed profiles) stay
+  // OFF-only as before: offering MIN..HIGH there sends an effort those models reject. Profiles without the wire
+  // param (kimi, codex, custom…) and ones asserting their models can't reason (Ollama) are served unchanged.
   if (!profile || profile.wireReasoningEffort !== true || profile.supportsReasoning === false || typeof provider.reasoningEfforts !== 'function') return models;
   return models.map(m => {
-    if (!m || m.supportsReasoning === false || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)) return m;
+    if (!m || m.supportsReasoning !== true || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)) return m;
     let efforts = null;
     try { efforts = provider.reasoningEfforts(m.id); } catch (_) { efforts = null; }
     return (Array.isArray(efforts) && efforts.length) ? Object.assign({}, m, { reasoningEfforts: efforts.slice() }) : m;

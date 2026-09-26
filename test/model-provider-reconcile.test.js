@@ -164,6 +164,15 @@ module.exports = (async () => {
   A.eq(offOnly.clamped, 'none', 'an OFF-only row still DISPLAYS as off');
   A.eq(offOnly.effort, 'low', '…but the display clamp no longer overwrites the saved effort');
   A.eq(offOnly.effortWrites, 0, 'no Harness effort write from a catalog render');
+  // The live grok-4.7 row as the sidecar now serves it (declared low..xhigh, no OFF): the saved LOW shows as LOW,
+  // MAX reaches the declared xhigh, and a saved OFF from another model only DISPLAYS as the nearest declared level.
+  const grokLive = [{ id: 'grok-4.7', name: 'Grok 4.7', context_length: 500000, supportsReasoning: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh'] }];
+  const grokLiveRun = await scenario('grok-4.7', grokLive, null, null, { provider: 'grok', effort: 'low' });
+  A.eq([grokLiveRun.model, grokLiveRun.effort, grokLiveRun.clamped, grokLiveRun.effortWrites], ['grok-4.7', 'low', 'low', 0], 'the live grok-4.7 row keeps the saved LOW');
+  const liveRow = grokLiveRun.rows.find(m => m.id === 'grok-4.7');
+  A.eq(grokLiveRun.internals.reasoningPresetsFor(liveRow).map(p => p.effort), ['low', 'medium', 'high', 'xhigh'], 'grok-4.7 presets span exactly its declared levels, MAX = xhigh');
+  const liveOff = await scenario('grok-4.7', grokLive, null, null, { provider: 'grok', effort: 'none' });
+  A.eq([liveOff.clamped, liveOff.effort, liveOff.effortWrites], ['low', 'none', 0], 'a saved OFF displays as the nearest declared level without being rewritten');
   // The sidecar now serves a failed grok /models as its static roster marked fallback: never a confirmed catalog.
   const grokSeed = grokRows.map(m => Object.assign({ fallback: true }, m));
   const seededGrok = await scenario('grok-custom-pin', grokSeed, null, null, { provider: 'grok', effort: 'low' });

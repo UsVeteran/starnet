@@ -26,12 +26,46 @@
   const PARAM_REJECTIONS = { reasoning_effort: /reasoning_?effort|does not support thinking/i };
   // The chat-completions wire accepts this effort scale; StarNet's wider scale (xhigh/max) clamps into it.
   const WIRE_EFFORTS = ['minimal', 'low', 'medium', 'high'];
-  function wireEffort(value) {
+  // A row whose catalog declares reasoning_efforts (xAI shape, see catalogEfforts) is held to that list instead:
+  // 'xhigh' rides the wire only when declared (grok-4.7 declares low..xhigh), and a level it lacks ('minimal') maps
+  // to the nearest one it has. Rows without that declaration keep the clamp above byte-for-byte.
+  const EFFORT_LADDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const DECLARED_WIRE = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+  function effortName(value) {
     const v = String(value || '').trim().toLowerCase();
-    if (!v || v === 'none' || v === 'off') return '';
-    if (v === 'xhigh' || v === 'max' || v === 'extrahigh') return 'high';
-    if (v === 'min') return 'minimal';
-    return WIRE_EFFORTS.indexOf(v) >= 0 ? v : 'medium';
+    return v === 'off' ? 'none' : v === 'min' ? 'minimal' : v === 'extrahigh' ? 'xhigh' : v;
+  }
+  function wireEffort(value, declared) {
+    const v = String(value || '').trim().toLowerCase();
+    const allowed = Array.isArray(declared) ? DECLARED_WIRE.filter(e => declared.some(d => effortName(d) === e)) : [];
+    // OFF on a row that declares no 'none' (grok-4.7 always reasons): omitting the param would hand the choice to
+    // the server default (xAI: high), the opposite of OFF — send the lowest level the model declares instead.
+    if (v === 'none' || v === 'off') return (allowed.length && !declared.some(d => effortName(d) === 'none')) ? allowed[0] : '';
+    if (!v) return '';
+    if (!allowed.length) {
+      if (v === 'xhigh' || v === 'max' || v === 'extrahigh') return 'high';
+      if (v === 'min') return 'minimal';
+      return WIRE_EFFORTS.indexOf(v) >= 0 ? v : 'medium';
+    }
+    let want = effortName(v === 'max' ? 'xhigh' : v);
+    if (DECLARED_WIRE.indexOf(want) < 0) want = 'medium';
+    const idx = DECLARED_WIRE.indexOf(want);
+    // nearest declared level: never above the requested effort when a lower one exists, else the next one up
+    for (let i = idx; i >= 0; i--) if (allowed.indexOf(DECLARED_WIRE[i]) >= 0) return DECLARED_WIRE[i];
+    for (let i = idx + 1; i < DECLARED_WIRE.length; i++) if (allowed.indexOf(DECLARED_WIRE[i]) >= 0) return DECLARED_WIRE[i];
+    return allowed[0];
+  }
+  /* xAI's Grok-CLI catalog (cli-chat-proxy /v1/models, 2026-09-25) declares efforts as objects —
+     reasoning_efforts: [{id:'xhigh', value:'xhigh', label:'Extra High', default:false}, …] — beside
+     supports_reasoning_effort:true. Read `value` (then `id`), keep only known levels, order low -> high. */
+  function catalogEfforts(list) {
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    for (const e of list) {
+      const name = effortName(e && typeof e === 'object' ? (e.value || e.id) : e);
+      if (EFFORT_LADDER.indexOf(name) >= 0) seen.add(name);
+    }
+    return EFFORT_LADDER.filter(e => seen.has(e));
   }
 
   // NO default endpoint. This adapter used to fall back to https://api.openai.com/v1 on an empty baseUrl,
@@ -121,7 +155,10 @@
     const id = (m && (m.id || m.name || m.model)) ? String(m.id || m.name || m.model) : '';
     if (!id) return null;
     const params = Array.isArray(m.supported_parameters) ? m.supported_parameters.slice() : [];
-    return {
+    // camelCase reasoningEfforts keeps its exact pre-existing handling; only an xAI-shape reasoning_efforts list
+    // (no camelCase list beside it) is parsed, and only such a row holds the wire to its declared levels.
+    const declared = Array.isArray(m.reasoningEfforts) ? null : catalogEfforts(m.reasoning_efforts);
+    const row = {
       id,
       name: m.name || id,
       context_length: Number(m.context_length || m.context_window || m.max_context_window || 0) || 0,
@@ -129,9 +166,12 @@
       pricing: m.pricing || null,
       supported_parameters: params,
       supportsTools: typeof m.supportsTools === 'boolean' ? m.supportsTools : (params.length ? params.indexOf('tools') >= 0 : null),
-      supportsReasoning: typeof m.supportsReasoning === 'boolean' ? m.supportsReasoning : null,
-      reasoningEfforts: Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts.slice() : []
+      supportsReasoning: typeof m.supportsReasoning === 'boolean' ? m.supportsReasoning
+        : (typeof m.supports_reasoning_effort === 'boolean' ? m.supports_reasoning_effort : null),
+      reasoningEfforts: declared || m.reasoningEfforts.slice()
     };
+    if (declared && declared.length) row.catalogEfforts = true;
+    return row;
   }
 
   function makeOpenAICompatibleProvider(opts) {
@@ -252,11 +292,11 @@
            for saved drop-state from older builds). */
       }
       // reasoning_effort goes on the wire only when the model provably reasons (catalog) or the provider
-      // profile documents the param — never to a row the catalog declares non-reasoning (grok-3, sonar); effort
+      // profile documents the param — never to a row declared non-reasoning (supportsReasoning:false — seed grok-3, sonar); effort
       // 'none' means omit it entirely. The UI's effort clamp is display-only, so this is the request-path guard.
-      const effort = wireEffort(req.reasoningEffort || defaultEffort);
+      const m = findModel(req.model);
+      const effort = wireEffort(req.reasoningEffort || defaultEffort, m && m.catalogEfforts ? m.reasoningEfforts : null);
       if (effort && !skip('reasoning_effort')) {
-        const m = findModel(req.model);
         const modelReasons = !!(m && (m.supportsReasoning === true || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)));
         if (modelReasons || (sendReasoningEffort && !deniesReasoning(m))) body.reasoning_effort = effort;
       }
@@ -502,5 +542,5 @@
     return { stream, listModels, contextLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
-  return { makeOpenAICompatibleProvider, _internals: { normalizeModel, cleanBaseUrl, responseErrorDetail, safeErrorField } };
+  return { makeOpenAICompatibleProvider, _internals: { normalizeModel, wireEffort, cleanBaseUrl, responseErrorDetail, safeErrorField } };
 });

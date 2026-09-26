@@ -135,7 +135,7 @@
   const GROK_COPY = {
     quota_exhausted: "Your Grok subscription's included usage is used up" + GROK_USAGE_FIX,
     billing: 'Your Grok subscription reached its usage or spending limit' + GROK_USAGE_FIX,
-    client_version: "Grok rejected the Grok CLI client version StarNet presents as out of date — set the STARNET_GROK_CLIENT_VERSION environment variable to a current Grok CLI version and restart StarNet. To keep working now, switch provider in SETTINGS → PROVIDERS."
+    client_version: "Grok rejected the Grok CLI client version StarNet presents as out of date — update StarNet, or set a current version yourself (macOS: run `launchctl setenv STARNET_GROK_CLIENT_VERSION <version>` in Terminal, then quit and reopen StarNet). To keep working now, switch provider in SETTINGS → PROVIDERS."
   };
   // GROK OAUTH names itself on its failures: "Grok (xAI) http …" / "Grok (xAI) stream error: …" from the adapter,
   // "GROK OAUTH: …" from the token path. A bare model id ("grok-4.7") is NOT that evidence — the XAI API-key
@@ -378,7 +378,9 @@
       kind = 'unknown';
     } else if (grokMeter && isSpentAllowance(raw.toLowerCase(), st)) {
       kind = 'quota_exhausted';
-    } else if (grokMeter && (st === 402 || TERMINAL_BILLING_RE.test(raw.toLowerCase()))) {
+    } else if (grokMeter && (TERMINAL_BILLING_RE.test(raw.toLowerCase())
+        // a 402 is billing unless it reads as a rate window — errorClass's 402 ladder, which keeps that retryable
+        || (st === 402 && !/(resets? at|retry[- ]?after|rate limit)/.test(raw.toLowerCase())))) {
       kind = 'billing';
     } else
     // xAI's Grok OAuth device flow can be 403-allowlisted off for an account: the backend says the OAuth surface

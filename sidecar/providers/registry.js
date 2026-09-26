@@ -119,9 +119,11 @@
       wireReasoningEffort: true,
       // Fallback roster for when the live /models catalog is unreachable (the xAI OAuth surface can 403 an
       // allowlisted-out account). Conservative, tools-only capability; the live catalog always wins when present.
+      // grok-4.7 mirrors its live cli-chat-proxy row (2026-09-25: context_window 500000, reasoning_efforts
+      // low..xhigh in xAI's own field shape, so the adapter holds the wire to it exactly as it does live).
       staticModelsFallback: true,
       staticModels: [
-        { id: 'grok-4.7', name: 'Grok 4.7', context_length: 256000, supportsTools: true, supportsReasoning: true },
+        { id: 'grok-4.7', name: 'Grok 4.7', context_length: 500000, supportsTools: true, supportsReasoning: true, reasoning_efforts: ['low', 'medium', 'high', 'xhigh'] },
         { id: 'grok-4', name: 'Grok 4', context_length: 256000, supportsTools: true, supportsReasoning: true },
         { id: 'grok-3', name: 'Grok 3', context_length: 131072, supportsTools: true, supportsReasoning: false },
         { id: 'grok-code-fast-1', name: 'Grok Code Fast 1', context_length: 256000, supportsTools: true, supportsReasoning: false }

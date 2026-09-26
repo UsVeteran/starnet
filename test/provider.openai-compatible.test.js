@@ -349,6 +349,90 @@ module.exports = (async () => {
     }
   }
 
+  // XAI GROK-CLI CATALOG SHAPE. The exact row a live GET cli-chat-proxy.grok.com/v1/models returned (2026-09-25):
+  // context_window (no context_length), supports_reasoning_effort, and reasoning_efforts as {id,value,label,default}
+  // objects. The row must come out honest, and the wire must only ever carry a level the row declares.
+  {
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    const { _internals } = require('../sidecar/providers/openai-compatible.js');
+    const LIVE = {"object":"list","data":[{"id":"grok-4.7","object":"model","owned_by":"xAI","model":"grok-4.7","model_family":"xai","name":"Grok 4.7","description":"...","context_window":500000,"auto_compact_threshold_percent":80,"system_prompt_label":"Grok 4.7","api_backend":"responses","reasoning_effort":"high","supports_reasoning_effort":true,"reasoning_efforts":[{"id":"xhigh","value":"xhigh","label":"Extra High","default":false},{"id":"high","value":"high","label":"High","default":true},{"id":"medium","value":"medium","label":"Medium","default":false},{"id":"low","value":"low","label":"Low","default":false}],"supports_backend_search":true}]};
+    const DECLARED = ['low', 'medium', 'high', 'xhigh'];
+    const posts = [];
+    const fetch = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify(LIVE), { status: 200 });
+      posts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const grok = selectProvider({ provider: 'grok', fetch, token: 'fixture-only' });
+    const [row] = await grok.listModels();
+    A.eq(row.id, 'grok-4.7', 'the live grok catalog row is read');
+    A.eq(row.fallback, undefined, 'a live row is not marked fallback');
+    A.eq(row.context_length, 500000, 'context_window becomes the context length when context_length is absent');
+    A.eq(grok.contextLimit('grok-4.7'), 500000, 'contextLimit() reports the declared 500k window');
+    A.eq(row.supportsReasoning, true, 'supports_reasoning_effort:true makes the row a reasoning row');
+    A.eq(row.reasoningEfforts, DECLARED, 'reasoning_efforts[].value become the declared efforts, ordered low -> high');
+    A.eq(row.reasoningEfforts.indexOf('none'), -1, 'no OFF is invented for a declared list that has none (codex/openrouter convention)');
+    A.eq(grok.reasoningEfforts('grok-4.7'), DECLARED, 'reasoningEfforts(id) exposes exactly the declared levels');
+    const sent = async effort => {
+      posts.length = 0;
+      await collect(grok, { model: 'grok-4.7', messages: [], reasoningEffort: effort });
+      return posts[0].reasoning_effort;
+    };
+    A.eq(await sent('low'), 'low', 'the grok profile default LOW is declared and sent as-is');
+    A.eq(await sent('high'), 'high', 'a declared level is sent unchanged');
+    A.eq(await sent('xhigh'), 'xhigh', 'xhigh rides the wire for a model that declares it');
+    A.eq(await sent('max'), 'xhigh', 'max maps to the declared ceiling xhigh');
+    A.eq(await sent('minimal'), 'low', 'minimal is never sent to a model that lacks it - nearest declared (low)');
+    A.eq(await sent('none'), 'low', 'OFF on an always-reasoning row sends its lowest declared level, not the server default (high)');
+    // the profile default (index.js resolveReasoningEffort -> the instance default) is the grok profile's declared 'low'
+    const factory = require('../sidecar/providers/factory.js');
+    A.eq(factory.defaultReasoningEffortForProvider('grok'), 'low', 'grok profile default effort stays low');
+    const byDefault = selectProvider({ provider: 'grok', fetch, token: 'fixture-only', reasoningEffort: factory.defaultReasoningEffortForProvider('grok') });
+    await byDefault.listModels();
+    posts.length = 0;
+    await collect(byDefault, { model: 'grok-4.7', messages: [] });
+    A.eq(posts[0].reasoning_effort, 'low', 'the grok profile default reaches the wire unchanged');
+
+    // other rows keep the pre-existing clamp byte-for-byte: no declaration -> xhigh clamps to high, minimal passes
+    const plainPosts = [];
+    const plainFetch = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [{ id: 'grok-4.3', context_length: 131072 }, { id: 'camel', reasoningEfforts: ['low', 'high', 'xhigh'] }] }), { status: 200 });
+      plainPosts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const xai = selectProvider({ provider: 'xai', fetch: plainFetch, key: 'fixture-only' });
+    const rows = await xai.listModels();
+    A.eq(rows[0].context_length, 131072, 'context_length still wins where it is present');
+    A.eq([rows[0].supportsReasoning, rows[0].reasoningEfforts, rows[0].catalogEfforts], [null, [], undefined], 'an undeclared row normalizes exactly as before');
+    A.eq(rows[1].reasoningEfforts, ['low', 'high', 'xhigh'], 'a camelCase declared list is kept verbatim');
+    for (const [model, effort, want] of [['grok-4.3', 'xhigh', 'high'], ['grok-4.3', 'max', 'high'], ['grok-4.3', 'minimal', 'minimal'], ['grok-4.3', 'medium', 'medium'], ['camel', 'xhigh', 'high'], ['camel', 'medium', 'medium']]) {
+      plainPosts.length = 0;
+      await collect(xai, { model, messages: [], reasoningEffort: effort });
+      A.eq(plainPosts[0].reasoning_effort, want, model + ' ' + effort + ' keeps the legacy wire clamp (' + want + ')');
+    }
+    A.eq(xai.reasoningEfforts('grok-4.3'), ['none', 'minimal', 'low', 'medium', 'high'], 'an undeclared row keeps the wire-scale dial');
+
+    // the clamp itself: undeclared lists are the legacy scale; declared lists map to the nearest declared level
+    const w = _internals.wireEffort;
+    A.eq([w('xhigh'), w('max'), w('min'), w('bogus'), w('none')], ['high', 'high', 'minimal', 'medium', ''], 'no declaration: legacy clamp unchanged');
+    A.eq([w('xhigh', ['low', 'high']), w('medium', ['low', 'high']), w('minimal', ['high']), w('high', ['none'])], ['high', 'low', 'high', 'high'], 'declared: nearest declared level, never above the request when a lower one exists');
+    A.eq([w('none', ['low', 'high']), w('off', ['medium', 'xhigh']), w('none', ['none', 'low']), w('', ['low'])], ['low', 'medium', '', ''], 'declared without OFF: none sends the lowest level; a declared none (or no effort) still omits');
+    A.eq(_internals.normalizeModel({ id: 'x', reasoning_efforts: ['XHIGH', { id: 'low' }, 'bogus', 'low'] }).reasoningEfforts, ['low', 'xhigh'], 'reasoning_efforts accepts string or {id} entries, drops unknown levels, dedupes');
+
+    // offline: the static roster's grok-4.7 mirrors the live row (500k, declared low..xhigh, same wire clamp)
+    const offPosts = [];
+    const offline = selectProvider({ provider: 'grok', token: 'fixture-only', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response('forbidden', { status: 403 });
+      offPosts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    } });
+    const seed = (await offline.listModels()).find(m => m.id === 'grok-4.7');
+    A.eq([seed.fallback, seed.context_length, seed.supportsReasoning, seed.reasoningEfforts], [true, 500000, true, DECLARED], 'the grok-4.7 seed row mirrors the live catalog row');
+    await collect(offline, { model: 'grok-4.7', messages: [], reasoningEffort: 'xhigh' });
+    await collect(offline, { model: 'grok-4.7', messages: [], reasoningEffort: 'minimal' });
+    A.eq(offPosts.map(b => b.reasoning_effort), ['xhigh', 'low'], 'the seed row holds the wire to its declared levels too');
+  }
+
   // tools are NEVER silently dropped - a provider that rejects tools must fail the run honestly
   {
     const calls = [];

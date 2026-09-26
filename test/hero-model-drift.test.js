@@ -128,6 +128,9 @@ function resume(saved) {
   hero.provider = null;
   ctx.setAgentModelPin('agent', 'grok-typed-2', '', '');
   A.eq(hero.provider, 'grok', 'a provider-less hero takes the live provider rather than null');
+  hero.provider = 'openrouter';   // stale: a Settings → PROVIDERS switch moved Harness (grok) but not the hero record
+  ctx.setAgentModelPin('agent', 'grok-typed-3', '', '');
+  A.eq([hero.provider, H.prov], ['grok', 'grok'], 'a blank provider pins the LIVE provider the dock shows, not a stale saved one');
   ctx.setAgentModelPin('worker', 'typed-worker-model', '', '');
   A.eq(worker.provider, null, 'a specialist\'s blank provider stays unset (follows the station)');
   const shell = o => '<picker inherit="' + o.inheritLabel + '">';

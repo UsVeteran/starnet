@@ -337,11 +337,13 @@ for (const raw of [
     A.eq(pay.retryable, false, label + ': grok 402 is not retryable');
     A.ok(/Extra Usage/.test(pay.userMessage) && !/top it up/i.test(pay.userMessage), label + ': grok 402 gets the Extra Usage fix, not "top it up"');
     A.eq(F(new Error('Grok (xAI) http 402 - not available for this account')).kind, 'billing', label + ': a grok 402 saying "not available" is billing, not the xAI-key door');
+    const win = F(new Error('Grok (xAI) http 402 - rate limit exceeded, resets at 12:00'));
+    A.eq([win.kind, win.retryable], ['rate_limit', true], label + ': a grok 402 rate window stays retryable, in step with errorClass');
 
     const old = F(new Error('Grok (xAI) http 426 - client version not allowed, please upgrade'));
     A.eq(old.retryable, false, label + ': grok 426 is not retryable');
     A.ok(old.kind !== 'oauth' && old.kind !== 'grok_oauth_unavailable', label + ': grok 426 is not a sign-in problem');
-    A.ok(/client version/i.test(old.userMessage) && /STARNET_GROK_CLIENT_VERSION/.test(old.userMessage), label + ': grok 426 names the client version and the env override');
+    A.ok(/client version/i.test(old.userMessage) && /launchctl setenv STARNET_GROK_CLIENT_VERSION/.test(old.userMessage), label + ': grok 426 names the client version and a desktop-reachable override');
     A.eq(old.action, 'settings', label + ': grok 426 still offers the PROVIDERS door');
 
     // the XAI API-key provider (unlabeled adapter) is pay-per-token credit: "top it up" stays right there, even
