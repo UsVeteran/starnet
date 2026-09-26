@@ -16387,7 +16387,9 @@ async function runOnceCore(o) {
     try { codexToken = await ensureCodexAccessToken(); }
     catch (e) {
       emit('agent.run.start', { agentId, runId, trigger: trigger, model });
-      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: 'ChatGPT sign-in needed: ' + ((e && e.message) || e) });
+      // Only a relogin-class failure is a sign-in problem; a quota/network refresh failure keeps its own words
+      // (a "sign-in needed" prefix sent it to a pointless ⏼ RECONNECT door in COMMS).
+      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: (e && e.reloginRequired ? 'ChatGPT sign-in needed: ' : 'ChatGPT: ') + ((e && e.message) || e) });
       emit('agent.run.end', { agentId, runId, reason: 'error', turns: 0, usd: 0 });
       return;
     }
@@ -16400,7 +16402,7 @@ async function runOnceCore(o) {
     try { oauthToken = await ensureOAuthAccessToken(providerId); }
     catch (e) {
       emit('agent.run.start', { agentId, runId, trigger: trigger, model });
-      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: oauthLabel(providerId) + ' sign-in needed: ' + ((e && e.message) || e) });
+      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: oauthLabel(providerId) + (e && e.reloginRequired ? ' sign-in needed: ' : ': ') + ((e && e.message) || e) });
       emit('agent.run.end', { agentId, runId, reason: 'error', turns: 0, usd: 0 });
       return;
     }

@@ -458,6 +458,61 @@ module.exports = (async () => {
     A.ok(!receipt.text.includes('PRIVATE PROMPT'), 'raw upstream payload is not copied');
   }
 
+  /* ---- FLAT xAI error bodies: {code, error:"<sentence>"} ----
+     A spent SuperGrok allowance answered 429 with a flat body. Reading only error.{message,code} left providerCode
+     '' and the raw JSON as the message, so the classifier saw a plain 429 (rate_limit) and the adapter retried a
+     meter no wait refills. Now: ONE request, a non-transient error, the code structured, the sentence human. */
+  {
+    let posts = 0;
+    const fetchImpl = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      posts++;
+      return new Response(JSON.stringify({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage for model grok-4.7. Enable Extra Usage to continue." }), { status: 429 });
+    };
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, key: 'k', baseUrl: 'https://cli-chat-proxy.example.test/v1', label: 'Grok (xAI)' });
+    let err = null;
+    try { await collect(p, { model: 'grok-4.7', messages: [{ role: 'user', content: 'hi' }] }); }
+    catch (e) { err = e; }
+    A.ok(err, 'the spent allowance fails the run');
+    A.eq(posts, 1, 'exactly ONE request — a spent allowance is never retried with backoff');
+    A.eq(err.transient, false, 'the error is marked non-transient');
+    A.ok(!err.preStreamRetriesExhausted, 'and was not treated as an exhausted transient ladder');
+    A.eq(err.providerCode, 'subscription:free-usage-exhausted', 'the flat top-level code is lifted into providerCode');
+    A.ok(/^Grok \(xAI\) http 429 - \[code subscription:free-usage-exhausted\] You've used all the included free usage/.test(err.message),
+      'the message is the human sentence (with its code), labeled with the provider: ' + err.message);
+    A.ok(!/[{}"]/.test(err.message), 'no raw JSON reaches the user');
+    // a flat {message, code} body reads the same way
+    const p2 = makeOpenAICompatibleProvider({ baseUrl: 'https://flat.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(JSON.stringify({ code: 'invalid_argument', message: 'Maximum tools limit reached' }), { status: 400 });
+    } });
+    let err2 = null;
+    try { await collect(p2, { model: 'm', messages: [] }); } catch (e) { err2 = e; }
+    A.eq(err2 && err2.providerCode, 'invalid_argument', 'flat {message, code}: code lifted');
+    A.ok(/\[code invalid_argument\] Maximum tools limit reached$/.test(err2 && err2.message), 'flat {message, code}: message is the sentence');
+    // an object-shaped body without a code gains no invented one
+    const p3 = makeOpenAICompatibleProvider({ baseUrl: 'https://obj.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(JSON.stringify({ code: 'top_level_ignored', error: { message: 'nested wins' } }), { status: 400 });
+    } });
+    let err3 = null;
+    try { await collect(p3, { model: 'm', messages: [] }); } catch (e) { err3 = e; }
+    A.eq(err3 && err3.providerCode, '', 'object-shaped error bodies keep reading error.code only');
+    A.ok(/http 400 - nested wins$/.test(err3 && err3.message), 'object-shaped error bodies keep their exact message');
+  }
+  // an in-stream flat error keeps its sentence (and code) instead of collapsing to 'provider stream error'
+  {
+    const fetchImpl = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(line({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage" }) + '\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://stream.example.test/v1' });
+    let err = null;
+    try { await collect(p, { model: 'm', messages: [] }); } catch (e) { err = e; }
+    A.eq(err && err.message, "You've used all the included free usage", 'the in-stream string error keeps its text');
+    A.eq(err && err.providerCode, 'subscription:free-usage-exhausted', 'and its code');
+  }
+
   // OUTPUT CEILING (issue #17): off by default, on when the profile declares it, explicit req.max_tokens wins,
   // and an endpoint that 400s on the legacy param name self-heals through the droppable list.
   {

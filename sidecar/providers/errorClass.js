@@ -61,7 +61,8 @@
   }
   function extractCode(body, err) {
     const e = body && (body.error || body);
-    const c = (e && e.code) || (err && err.code);
+    // providerCode: the upstream body's code as openai-compatible.js lifted it (flat xAI bodies carry no `body`)
+    const c = (e && e.code) || (err && err.code) || (err && err.providerCode);
     // node transport codes (ECONNRESET…) are numeric-ish strings handled separately; only return API codes here
     return (typeof c === 'string' && !/^E[A-Z]/.test(c)) ? c : (typeof c === 'number' ? null : (c || null));
   }
@@ -171,10 +172,18 @@
      allowance, not a rate limit. Status-before-message precedence is deliberate (see the note in pickReason),
      so this is a distinct class WITHIN the 429 rather than a reordering: only a long or absolute reset window,
      or an explicit usage-limit type, qualifies. Gemini answers a PER-MINUTE limit with "Quota exceeded for
-     quota metric", and that must stay rate_limit — hence the short-window veto. */
-  const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)/;
+     quota metric", and that must stay rate_limit — hence the short-window veto.
+     xAI's SuperGrok subscription says it as a 429 {code:'subscription:free-usage-exhausted', error:"You've used
+     all the included free usage for model …"} — the same spent allowance, so the same terminal class. */
+  const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)|usage[-_ ]?exhausted|used all (?:of )?(?:the |your )?included (?:free )?usage/;
   const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|rpm|tpm|requests per/;
   function isQuotaExhausted(low) { return QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low); }
+  // structured codes for the same spent allowance (Codex usage_limit_reached, xAI subscription:free-usage-exhausted)
+  const QUOTA_CODE_RE = /usage_limit_reached|quota_exhausted|plan_limit|usage[-_ ]?exhausted/;
+  /* An account with no money (or at its spending cap) is BILLING, and no wait fixes it: OpenAI answers
+     insufficient_quota with 429, and xAI's API-key surface answers an empty team with 429 "used all available
+     credits or reached its monthly spending limit". */
+  const TERMINAL_BILLING_RE = /insufficient[_ ]?quota|exceeded your current quota|out of credit|add credits|payment required|spending limit|used all available credits/;
 
   function pickReason(status, code, low, err, ctx) {
     /* 1. content / policy (most specific intent) — but a TRANSPORT status wins over a text match.
@@ -189,17 +198,28 @@
     // 2. HTTP status
     if (status) {
       if (status === 401 || status === 403) return 'auth';
-      if (status === 402) return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
+      if (status === 402) {
+        // the same terminal bodies as the 429 below outrank the reset-window read: "spending limit resets at…" is
+        // still an empty wallet (Payment Required, so billing reads first), and "used all the included free
+        // usage" is a spent allowance, which — unlike billing — another provider can pick up.
+        if (TERMINAL_BILLING_RE.test(low)) return 'billing';
+        if (isQuotaExhausted(low) || QUOTA_CODE_RE.test(String(code || '').toLowerCase())) return 'quota_exhausted';
+        return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
+      }
       if (status === 404) return 'model_not_found';
       if (status === 408) return 'timeout';
+      /* 426 Upgrade Required: the endpoint refuses this CLIENT (xAI's cli-chat-proxy gates on the Grok-CLI
+         version header). format_error is the honest existing class: the request itself is unacceptable, so a
+         retry, a rotated credential or a compaction resends the same rejected thing — non-retryable and not
+         auth (the sign-in is fine; re-signing in would be a doomed door). */
+      if (status === 426) return 'format_error';
       if (status === 429) {
         /* A 429 can carry a TERMINAL body, and neither of these clears by waiting: a spent subscription
            allowance, or an account with no money left — OpenAI answers `insufficient_quota` with 429, not 402,
            so the plain status read burned every retry slot against a wallet that needs topping up. */
         const c429 = String(code || '').toLowerCase();
-        if (isQuotaExhausted(low) || /usage_limit_reached|quota_exhausted|plan_limit/.test(c429)) return 'quota_exhausted';
-        if (/insufficient[_ ]?quota|exceeded your current quota|out of credit|add credits|payment required/.test(low)
-          || /insufficient[_ ]?quota/.test(c429)) return 'billing';
+        if (isQuotaExhausted(low) || QUOTA_CODE_RE.test(c429)) return 'quota_exhausted';
+        if (TERMINAL_BILLING_RE.test(low) || /insufficient[_ ]?quota/.test(c429)) return 'billing';
         return 'rate_limit';
       }
       if (status === 500) return 'server_error';
@@ -211,7 +231,7 @@
     if (code) {
       const c = String(code).toLowerCase();
       if (/context_length|context_window|max.*token/.test(c)) return 'context_overflow';
-      if (/usage_limit_reached|quota_exhausted|plan_limit/.test(c)) return 'quota_exhausted';
+      if (QUOTA_CODE_RE.test(c)) return 'quota_exhausted';
       if (/insufficient_quota|insufficient_credit|billing|payment/.test(c)) return 'billing';
       if (/rate_limit/.test(c)) return 'rate_limit';
       if (/model_not_found|unknown_model|no_endpoints/.test(c)) return 'model_not_found';
@@ -221,7 +241,7 @@
     // 4. message patterns
     if (/context length|maximum context|context window|too many tokens|reduce the length|maximum.*tokens/.test(low)) return 'context_overflow';
     if (isQuotaExhausted(low)) return 'quota_exhausted';
-    if (/insufficient|not enough credit|out of credit|quota|payment required|add credits/.test(low)) return 'billing';
+    if (/insufficient|not enough credit|out of credit|quota|payment required|add credits|spending limit|used all available credits/.test(low)) return 'billing';
     if (/rate limit|too many requests/.test(low)) return 'rate_limit';
     if (/overloaded|over capacity|temporarily unavailable|try again later/.test(low)) return 'overloaded';
     if (/no endpoints|model not found|not a valid model|unknown model|no allowed providers/.test(low)) return 'model_not_found';

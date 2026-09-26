@@ -286,6 +286,29 @@ const openCtx = () => ({ canRun: () => true, canUse: () => ({ ok: true }), agent
     A.eq(res.reason, 'done', 'a provider that never reports termination still ends done');
   }
 
+  // (quota-no-chain) a SPENT ALLOWANCE (xAI SuperGrok free-usage 429, as openai-compatible.js throws it) with no
+  //     fallback chain ends the run on the FIRST attempt: quota_exhausted is non-retryable, so the loop must not
+  //     spend its same-provider retry ladder (and the non-transient error stops cron's 90s re-fires).
+  {
+    const { seq, emit } = setup();
+    let attempt = 0;
+    const waits = [];
+    const provider = scriptedProvider(async function* () {
+      attempt++;
+      throw Object.assign(new Error("Grok (xAI) http 429 - [code subscription:free-usage-exhausted] You've used all the included free usage for model grok-4.7."),
+        { status: 429, providerCode: 'subscription:free-usage-exhausted', transient: false });
+      yield;
+    });
+    const res = await runAgentLoop({ messages: [{ role: 'user', content: 'x' }], provider, emit, cost: cost(), model: 'grok-4.7', agentId: 'a', runId: 'r', sleep: async ms => { waits.push(ms); } });
+    A.eq(attempt, 1, 'a spent allowance is attempted exactly once — no retry loop');
+    A.eq(waits.length, 0, 'no backoff sleep was scheduled');
+    A.eq([res.reason, res.failureCode], ['error', 'quota_exhausted'], 'the run ends in error with the quota_exhausted failure code');
+    const runErr = seq.find(e => e.name === 'agent.run.error');
+    A.eq(runErr.payload.transient, false, 'the terminal error is NOT transient (cron finalizes instead of re-firing)');
+    A.ok(/used all the included free usage/.test(runErr.payload.message), 'the run error carries the human sentence');
+    A.eq(seq.filter(e => e.name === 'provider.fallback').length, 0, 'no failover was claimed without a chain');
+  }
+
   // (window-re-resolve) a cross-provider fallback RE-RESOLVES the context window. Everything else about the
   //     failover swaps (provider, model, cost, credential) but the compaction threshold was frozen at the
   //     PRIMARY model's window: after a 200k→8k switch the manager kept waiting for prompt tokens the small

@@ -75,9 +75,15 @@
       try { data = await res.json(); } catch (_) { data = null; }
     }
     const e = data && data.error;
-    const message = safeErrorField((e && e.message) || (data && data.message) || text || res.statusText || ('HTTP ' + res.status), 500);
+    /* FLAT BODIES (xAI): {code:'subscription:free-usage-exhausted', error:"You've used all the included free
+       usage…"} carries its sentence IN `error` and its code at the top level. Reading only error.{message,code}
+       left providerCode '' and put the raw JSON in front of the user. Object-shaped `error` bodies keep the
+       exact reads below; the flat fallbacks only apply when `error` is a string or absent. */
+    const flat = !(e && typeof e === 'object');
+    const flatText = flat && typeof e === 'string' ? e : '';
+    const message = safeErrorField((e && e.message) || flatText || (data && data.message) || text || res.statusText || ('HTTP ' + res.status), 500);
     const type = safeErrorField(e && e.type, 80);
-    const code = safeErrorField(e && e.code, 80);
+    const code = safeErrorField(flat ? (data ? data.code : undefined) : e.code, 80);
     // OpenRouter places provider identity in metadata; raw metadata is deliberately ignored because it may
     // contain provider payloads or user content. The managed proxy promotes only this allowlisted field.
     const providerName = safeErrorField((e && e.provider) || (e && e.metadata && (e.metadata.provider_name || e.metadata.provider)), 100);
@@ -281,7 +287,16 @@
         try { return { json: JSON.parse(data) }; } catch (_) { return null; }
       }
       function* emitFrom(j) {
-        if (j.error) throw new Error((j.error && (j.error.message || j.error.code)) || 'provider stream error');
+        if (j.error) {
+          // a flat in-stream error ({error:"<sentence>", code}) keeps its words instead of 'provider stream error'
+          if (typeof j.error === 'string') {
+            const se = new Error(safeErrorField(j.error, 500) || 'provider stream error');
+            const sc = safeErrorField(j.code, 80);
+            if (sc) se.providerCode = sc;
+            throw se;
+          }
+          throw new Error((j.error && (j.error.message || j.error.code)) || 'provider stream error');
+        }
         if (j.usage) yield { type: 'usage', usage: j.usage };
         const choice = j.choices && j.choices[0];
         if (!choice) return;
