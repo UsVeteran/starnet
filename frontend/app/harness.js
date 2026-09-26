@@ -467,6 +467,7 @@ const Harness = (() => {
   function defaultReasoningEffortForProvider(provider) {
     const p = normalizeProviderId(provider);
     if (p === 'codex') return 'low';
+    if (p === 'grok') return 'low';    // mirrors the sidecar registry profile (SuperGrok subscription: light reasoning by default)
     if (p === 'kimi') return 'none';   // mirrors the sidecar registry profile (kimi-for-coding has no reasoning dial)
     if (p === 'ollama') return 'none';
     return 'medium';

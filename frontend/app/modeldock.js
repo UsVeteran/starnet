@@ -405,12 +405,11 @@ const ModelDock = (() => {
     return clampEffortForModel(currentEffort(), item || currentModelItem());
   }
 
+  // DISPLAY-ONLY clamp. Writing the clamp back into Harness on every reflect let one OFF-only catalog render
+  // (grok's live rows before they carried efforts) persist 'none' over the saved effort. Only explicit choices
+  // (applyModel / applyEffort) write; the sidecar adapters clamp or omit an effort a model can't take.
   function ensureCurrentEffort() {
-    const item = currentModelItem();
-    const raw = currentEffort();
-    const effort = clampEffortForModel(raw, item);
-    if (effort !== raw && typeof Harness !== 'undefined' && Harness.setReasoningEffort) Harness.setReasoningEffort(effort);
-    return effort;
+    return clampEffortForModel(currentEffort(), currentModelItem());
   }
 
   async function fetchProviderModels(p, force) {
@@ -730,7 +729,7 @@ const ModelDock = (() => {
     if (!tip) return;
     const current = getModel();
     const p = provider();
-    const effort = currentEffort();
+    const effort = effectiveEffort();   // the same clamped tier the chip shows
     const def = effortDef(effort);
     const model = current ? modelLabel({ id: current }) : 'no model selected';
     tip.innerHTML =

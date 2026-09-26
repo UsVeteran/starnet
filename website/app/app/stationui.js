@@ -2499,7 +2499,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div class="mc-hint">' + (pinned ? 'pinned — this agent ignores the station default' : 'following the station default') + '</div>' +
       '<div class="mc-acts">' +
         '<button class="bb sm" id="ag-model-save">SAVE MODEL</button>' +
-        (pinned ? '<button class="bb xs" id="ag-model-clear" title="run this agent on the station default model again">FOLLOW STATION DEFAULT</button>' : '') +
+        // the hero IS the station default (App refuses to clear its pin), so it gets no FOLLOW button
+        ((pinned && !(a && a.id === 'agent')) ? '<button class="bb xs" id="ag-model-clear" title="run this agent on the station default model again">FOLLOW STATION DEFAULT</button>' : '') +
       '</div>' +
       '<div id="ag-model-msg" class="msg"></div>' +
     '</div>';

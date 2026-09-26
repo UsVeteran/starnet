@@ -467,6 +467,8 @@ const App = (() => {
     if (!a) return false;
     const m = String(model || '').trim();
     const p = String(provider || '').trim();
+    // the hero IS the station default: clearing its pin left a model-less Commander on relaunch — refuse
+    if (!m && a.id === 'agent') return false;
     a.model = m || null;
     a.provider = p || null;
     // effort is OPTIONAL + additive: written only when the 4th arg is passed (older 3-arg callers untouched); a clear also clears it.
@@ -826,15 +828,24 @@ const App = (() => {
   }
   function applyQuickModel(sel) {
     if (!agent || !sel) return;
-    // An explicit empty model is meaningful: ModelDock uses it to invalidate a saved provider/model pair
-    // after a successful catalog proves the model absent. Do not `||` it back into the stale Harness value.
+    const provider = normalizeProviderId(sel.provider || ((typeof Harness !== 'undefined' && Harness.getProv) ? Harness.getProv() : 'openrouter'));
+    // A catalog verdict is not the Commander's choice: 'catalog_unavailable' (a confirmed catalog lacks the saved
+    // model) NOTIFIES only. Writing its blank model + provider + effort onto the agent, pushing the roster and
+    // persisting was the relaunch drift (the hero back model-less, or on the 'ollama' a KeyCTA/Settings switch left
+    // in Harness). The agent's saved pin stands until a model is picked.
+    if (sel.reason === 'catalog_unavailable') {
+      if (typeof ModelDock !== 'undefined' && ModelDock.reflect) ModelDock.reflect();
+      if (typeof Chat !== 'undefined' && Chat.refreshIdBar) Chat.refreshIdBar();
+      if (typeof KeyCTA !== 'undefined' && KeyCTA.refresh) KeyCTA.refresh();
+      if (typeof StationUI !== 'undefined' && StationUI.notify) StationUI.notify('MODEL UNAVAILABLE: ' + String(sel.previousModel || 'saved model') + ' is not in the ' + providerLabel(provider) + ' catalog — pick a model to continue', 'good');
+      return;
+    }
+    // An explicit empty model (an effort change with nothing selected) must not `||` back into a stale Harness value.
     const suppliedModel = Object.prototype.hasOwnProperty.call(sel, 'model');
     const model = String((suppliedModel ? sel.model : ((typeof Harness !== 'undefined' && Harness.getModel) ? Harness.getModel() : '')) || '').trim();
-    const provider = normalizeProviderId(sel.provider || ((typeof Harness !== 'undefined' && Harness.getProv) ? Harness.getProv() : 'openrouter'));
     const effort = (typeof Harness !== 'undefined' && Harness.normalizeReasoningEffort) ? Harness.normalizeReasoningEffort(sel.effort) : String(sel.effort || 'medium');
     if (effort && typeof Harness !== 'undefined' && Harness.setReasoningEffort) Harness.setReasoningEffort(effort);
-    const catalogInvalid = sel.reason === 'catalog_unavailable';
-    if (model || catalogInvalid) {
+    if (model) {
       if (typeof Harness !== 'undefined' && Harness.setProv) Harness.setProv(provider);
       if (typeof Harness !== 'undefined' && Harness.setModel) Harness.setModel(model);
       agent.model = model; agent.provider = provider; agent.reasoningEffort = effort;   // #4: keep model+provider+effort TOGETHER on the agent
@@ -849,13 +860,11 @@ const App = (() => {
     if (typeof Chat !== 'undefined' && Chat.refreshIdBar) Chat.refreshIdBar();   // keep the COMMS header model readout in sync with the footer dock change
     if (typeof KeyCTA !== 'undefined' && KeyCTA.refresh) KeyCTA.refresh();   // a provider switch can change key state — keep the keyless-brain banner honest
     if (typeof StationUI !== 'undefined' && StationUI.notify) {
-      const msg = catalogInvalid
-        ? 'MODEL UNAVAILABLE: ' + String(sel.previousModel || 'saved model') + ' is not in the ' + providerLabel(provider) + ' catalog — pick a model to continue'
-        : sel.reason === 'catalog_reconcile'
-          ? 'MODEL UPDATED: ' + String(sel.previousModel || 'saved model') + ' → ' + model + ' (confirmed in ' + providerLabel(provider) + ')'
-          : sel.reason === 'effort'
-            ? 'REASONING: ' + effortLabel(effort)
-            : 'MODEL: ' + providerLabel(provider) + ' / ' + shortModelLabel(model) + ' / ' + effortLabel(effort);
+      const msg = sel.reason === 'catalog_reconcile'
+        ? 'MODEL UPDATED: ' + String(sel.previousModel || 'saved model') + ' → ' + model + ' (confirmed in ' + providerLabel(provider) + ')'
+        : sel.reason === 'effort'
+          ? 'REASONING: ' + effortLabel(effort)
+          : 'MODEL: ' + providerLabel(provider) + ' / ' + shortModelLabel(model) + ' / ' + effortLabel(effort);
       StationUI.notify(msg, 'good');
     }
   }
@@ -1489,7 +1498,7 @@ const App = (() => {
   const FALLBACK_MODELS = Object.freeze({
     // grok/kimi mirror the sidecar registry's staticModels (the OAuth catalogs are account-discovered live;
     // these are only the offline/not-signed-in fallback so the field is never stranded empty).
-    grok: ['grok-4', 'grok-3', 'grok-code-fast-1'],
+    grok: ['grok-4.7', 'grok-4', 'grok-3', 'grok-code-fast-1'],
     kimi: ['kimi-for-coding', 'kimi-for-coding-highspeed', 'k3'],
     openai: ['gpt-5.5', 'gpt-5.4', 'gpt-4.1'],
     anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-3-5-haiku-latest'],
@@ -2651,8 +2660,11 @@ const App = (() => {
     if (Save.isFuture && Save.isFuture()) { showFutureSaveGate(Save.loadStatus().version); return; }
     const saved = Save.has() ? Save.load() : null;
     if (saved && saved.agent) {
-      if (saved.prov && Harness.setProv) Harness.setProv(saved.prov);
-      if (saved.reasoningEffort && Harness.setReasoningEffort) Harness.setReasoningEffort(saved.reasoningEffort);
+      // hero-first, root as legacy fallback — the same selection boot() and resumeInto() apply
+      const prov = saved.agent.provider || saved.prov;
+      const effort = saved.agent.reasoningEffort || (saved.reasoningEffort && (!saved.prov || saved.prov === prov) ? saved.reasoningEffort : '');
+      if (prov && Harness.setProv) Harness.setProv(prov);
+      if (effort && Harness.setReasoningEffort) Harness.setReasoningEffort(effort);
       if (Harness.getKey() || (Harness.configured && Harness.configured()) || Harness.getProv() === 'codex') {
         resumingSaved = null; resumeInto(saved); return;
       }
@@ -2920,10 +2932,14 @@ const App = (() => {
     registerHero(agent);                           // found the registry with the hero…
     rehydrateRoster(saved.agents);                 // …then restore any summoned crew (older saves: no-op)
     recomposeOrchestrators();                      // …and only NOW does the hero's YOUR CREW clause see them (composing above sees an empty registry)
-    if (saved.prov && Harness.setProv) Harness.setProv(saved.prov);   // keep the provider with the agent (codex vs openrouter)
-    if (saved.reasoningEffort && Harness.setReasoningEffort) Harness.setReasoningEffort(saved.reasoningEffort);
     if (!agent.provider && saved.prov) agent.provider = saved.prov;   // #4: older hero saves stored provider only at the top level — stamp it onto the hero object so focusAgent restores it
-    if (!agent.reasoningEffort && saved.reasoningEffort) agent.reasoningEffort = saved.reasoningEffort;
+    // the root effort belongs to the root provider's scope — backfill it only onto a hero on that same provider
+    if (!agent.reasoningEffort && saved.reasoningEffort && (!saved.prov || saved.prov === agent.provider)) agent.reasoningEffort = saved.reasoningEffort;
+    // The HERO's own provider + effort win (mirrors focusAgent); the save root is only the legacy backfill above. The
+    // root records the GLOBAL Harness selection at persist time (a focused crew member's, or a KeyCTA/Settings switch
+    // the hero never adopted), so applying it first put the hero on 'ollama' / effort 'none' after a relaunch.
+    if (agent.provider && Harness.setProv) Harness.setProv(agent.provider);   // keep the provider with the agent (codex vs openrouter)
+    if (agent.reasoningEffort && Harness.setReasoningEffort) Harness.setReasoningEffort(agent.reasoningEffort);   // scoped to that provider
     Harness.setModel(agent.model || Harness.getModel());
     Harness.setTotals(saved.usage || { tokens: 0, cost: 0, calls: 0 });
     Workstreams.init({ workstreams: saved.workstreams, activeId: saved.activeId, generalId: saved.generalId, sessionUndo: saved.sessionUndo, deletedIds: saved.deletedIds });
@@ -5165,8 +5181,12 @@ const App = (() => {
     }
     // restore the provider BEFORE the credential check so a codex agent (tokens server-side) jumps straight
     // in after a wipe/origin-reset instead of being misrouted to an OpenRouter key prompt.
-    if (saved && saved.prov && Harness.setProv) Harness.setProv(saved.prov);
-    if (saved && saved.reasoningEffort && Harness.setReasoningEffort) Harness.setReasoningEffort(saved.reasoningEffort);
+    // The hero's own provider/effort first (resumeInto applies the same), the save root only as the legacy fallback
+    // (its effort only when it was recorded on that same provider).
+    const bootProv = (saved && saved.agent && saved.agent.provider) || (saved && saved.prov);
+    const bootEffort = (saved && saved.agent && saved.agent.reasoningEffort) || (saved && saved.reasoningEffort && (!saved.prov || saved.prov === bootProv) ? saved.reasoningEffort : '');
+    if (bootProv && Harness.setProv) Harness.setProv(bootProv);
+    if (bootEffort && Harness.setReasoningEffort) Harness.setReasoningEffort(bootEffort);
     if (saved && saved.agent) {
       // AUTO-RESUME: a saved station goes STRAIGHT back into the world when creds are available — an OpenRouter
       // key in hand, the desktop keychain holds one (configured, incl. the DEV fast-path), OR the Codex provider
