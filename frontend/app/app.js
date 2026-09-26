@@ -466,9 +466,10 @@ const App = (() => {
     const a = agents.get(String(agentId || '')) || (agent && agent.id === agentId ? agent : null);
     if (!a) return false;
     const m = String(model || '').trim();
-    const p = String(provider || '').trim();
     // the hero IS the station default: clearing its pin left a model-less Commander on relaunch — refuse
     if (!m && a.id === 'agent') return false;
+    // a blank provider keeps the hero on its own (else the live) one — a null let relaunch take the save root's
+    const p = String(provider || '').trim() || String((a.id === 'agent' && (a.provider || (typeof Harness !== 'undefined' && Harness.getProv && Harness.getProv()))) || '');
     a.model = m || null;
     a.provider = p || null;
     // effort is OPTIONAL + additive: written only when the 4th arg is passed (older 3-arg callers untouched); a clear also clears it.
@@ -2845,6 +2846,9 @@ const App = (() => {
       s.prov = Harness.getProv();
       s.agent.provider = s.prov;
       s.agent.model = model;
+      // …and the effort just picked on this screen: resumeInto is hero-first, so a stale hero effort (possibly
+      // another provider's) would otherwise be written into the newly chosen provider's scope.
+      if (Harness.getReasoningEffort) s.agent.reasoningEffort = s.reasoningEffort = Harness.getReasoningEffort();
       resumeInto(s); return true;
     }
 

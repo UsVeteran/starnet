@@ -125,6 +125,7 @@ A.ok(/function selectAgent[\s\S]{0,2200}switchWorkstream\(ws\.id\)/.test(appjs),
 // the header model readout stays truthful when the model changes via the footer dock or the dossier pin.
 A.ok(/refreshIdBar:\s*renderIdBar/.test(chat), 'chat.js exposes refreshIdBar so other surfaces can re-sync the header model');
 A.ok(/function applyQuickModel[\s\S]{0,2200}Chat\.refreshIdBar\(\)/.test(appjs), 'the footer dock model change re-syncs the COMMS header readout');
-A.ok(/function setAgentModelPin[\s\S]{0,1500}Chat\.refreshIdBar\(\)/.test(appjs), 'the dossier model pin re-syncs the COMMS header readout');
+// window widened 1500→1800 for the hero guards (no pin clear; a blank provider keeps the hero's own)
+A.ok(/function setAgentModelPin[\s\S]{0,1800}Chat\.refreshIdBar\(\)/.test(appjs), 'the dossier model pin re-syncs the COMMS header readout');
 
 A.report('agent-model-select.test');

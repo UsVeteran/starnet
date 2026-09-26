@@ -159,6 +159,8 @@ module.exports = (async () => {
   A.eq(grok.clamped, 'low', 'the dock shows LOW for a grok row that carries the wire efforts');
   A.eq(grok.effortWrites, 0, 'reflect never writes reasoning effort');
   const offOnly = await scenario('grok-4.7', [{ id: 'grok-4.7', supportsReasoning: false }], null, null, { provider: 'grok', effort: 'low' });
+  // The saved effort therefore still reaches the sidecar for an OFF-only row; the request-path guard lives there
+  // (provider.openai-compatible.test: REASONING-EFFORT REQUEST GUARD; model-catalog-truth: OFF-only serving).
   A.eq(offOnly.clamped, 'none', 'an OFF-only row still DISPLAYS as off');
   A.eq(offOnly.effort, 'low', '…but the display clamp no longer overwrites the saved effort');
   A.eq(offOnly.effortWrites, 0, 'no Harness effort write from a catalog render');

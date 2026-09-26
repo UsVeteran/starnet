@@ -20,6 +20,10 @@
   // them. `tools` is deliberately NOT in this list: silently removing tools would let a task run proceed
   // without the capability it needs (the run must fail honestly instead).
   const DROPPABLE_PARAMS = ['stream_options', 'parallel_tool_calls', 'tool_choice', 'reasoning_effort', 'max_tokens'];
+  // Rejections that refuse a param without spelling its wire name: xAI names it camelCase (`reasoningEffort`), and
+  // Ollama refuses a non-thinking model outright ('"llama3.1:8b" does not support thinking') — a hard 400 on every
+  // turn unless the effort is dropped. Params absent here match their wire name only.
+  const PARAM_REJECTIONS = { reasoning_effort: /reasoning_?effort|does not support thinking/i };
   // The chat-completions wire accepts this effort scale; StarNet's wider scale (xhigh/max) clamps into it.
   const WIRE_EFFORTS = ['minimal', 'low', 'medium', 'high'];
   function wireEffort(value) {
@@ -203,7 +207,7 @@
       const text = String(detail || '').toLowerCase();
       for (const p of DROPPABLE_PARAMS) {
         if (body[p] === undefined) continue;
-        if (text.indexOf(p) >= 0) { delete body[p]; rememberDrop(body.model, p); return p; }
+        if (PARAM_REJECTIONS[p] ? PARAM_REJECTIONS[p].test(text) : text.indexOf(p) >= 0) { delete body[p]; rememberDrop(body.model, p); return p; }
       }
       return null;
     }
@@ -248,12 +252,13 @@
            for saved drop-state from older builds). */
       }
       // reasoning_effort goes on the wire only when the model provably reasons (catalog) or the provider
-      // profile documents the param; effort 'none' means omit it entirely.
+      // profile documents the param — never to a row the catalog declares non-reasoning (grok-3, sonar); effort
+      // 'none' means omit it entirely. The UI's effort clamp is display-only, so this is the request-path guard.
       const effort = wireEffort(req.reasoningEffort || defaultEffort);
       if (effort && !skip('reasoning_effort')) {
         const m = findModel(req.model);
         const modelReasons = !!(m && (m.supportsReasoning === true || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)));
-        if (modelReasons || sendReasoningEffort) body.reasoning_effort = effort;
+        if (modelReasons || (sendReasoningEffort && !deniesReasoning(m))) body.reasoning_effort = effort;
       }
       let res;
       try { res = await requestWithRetry(body, req.signal); }
@@ -464,6 +469,8 @@
       });
     }
     function findModel(id) { return catalog ? catalog.find(m => m.id === id) : null; }
+    // a catalog row that explicitly says it cannot reason and declares no effort list (unknown rows stay null)
+    function deniesReasoning(m) { return !!(m && m.supportsReasoning === false && !(Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)); }
     function contextLimit(id) { const m = findModel(id); return (m && m.context_length) || defaultContext; }
     function catalogPriceOf(id) {
       const m = findModel(id);
@@ -488,7 +495,7 @@
     function reasoningEfforts(id) {
       const m = findModel(id);
       if (m && Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length) return m.reasoningEfforts.slice();
-      if ((m && m.supportsReasoning === true) || sendReasoningEffort) return ['none'].concat(WIRE_EFFORTS);
+      if ((m && m.supportsReasoning === true) || (sendReasoningEffort && !deniesReasoning(m))) return ['none'].concat(WIRE_EFFORTS);
       return ['none'];
     }
 

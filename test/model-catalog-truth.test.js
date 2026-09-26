@@ -79,11 +79,21 @@ module.exports = (async () => {
     A.eq((await served('kimi'))[0].reasoningEfforts, [], 'kimi (no reasoning_effort wire param) is served unchanged');
     wire = [{ id: 'gpt-5.5' }];
     A.eq((await served('openai'))[0].reasoningEfforts, WIRE, 'keyed openai rows expose the efforts its adapter sends');
+    // Ollama documents the wire param but its profile asserts supportsReasoning:false — a non-thinking local model
+    // 400s on ANY effort, so its rows stay OFF-only (the pre-fill behaviour) instead of offering MIN..HIGH.
+    wire = [{ id: 'llama3.1:8b', object: 'model' }, { id: 'qwen3:14b', object: 'model' }];
+    A.eq((await served('ollama')).map(r => r.reasoningEfforts), [[], []], 'ollama rows are served without an effort dial');
     fetchImpl = failFetch;
     rows = await served('grok');
     A.eq(rows.map(r => r.id), ['grok-4.7', 'grok-4', 'grok-3', 'grok-code-fast-1'], 'a failed grok /models serves the static roster');
     A.ok(rows.every(r => r.fallback === true), 'grok seed rows keep fallback provenance through serialization');
     A.eq(rows[0].reasoningEfforts, WIRE, 'grok seed rows carry the same effort dial');
+    A.eq(rows[1].reasoningEfforts, WIRE, 'grok-4 (supportsReasoning:true) seed row carries the dial');
+    A.eq([rows[2].reasoningEfforts, rows[3].reasoningEfforts], [[], []], 'grok-3 / grok-code-fast-1 (registry supportsReasoning:false) are never filled');
+    const sonar = await served('perplexity');
+    const byId = id => sonar.find(r => r.id === id);
+    A.eq([byId('sonar').reasoningEfforts, byId('sonar-pro').reasoningEfforts], [[], []], 'perplexity sonar / sonar-pro (supportsReasoning:false) are never filled');
+    A.eq(byId('sonar-reasoning-pro').reasoningEfforts, WIRE, 'perplexity sonar-reasoning-pro keeps its dial');
     rows = await served('kimi');
     A.ok(rows.length && rows.every(r => r.fallback === true && r.reasoningEfforts.length === 0), 'kimi seed rows are fallback and effort-less');
   }

@@ -121,9 +121,39 @@ function resume(saved) {
   A.eq(worker.model, null, 'the specialist pin is cleared');
   A.eq(ctx.setAgentModelPin('agent', 'grok-4', 'grok', 'medium'), true, 'the hero can still be re-pinned to another model');
   A.eq([hero.model, H.model, H.efforts.grok], ['grok-4', 'grok-4', 'medium'], 'a hero re-pin retargets the live harness');
-  const card = vm.runInNewContext(fn(ui, '  function modelCard(') + '\n({ hero: modelCard(h), worker: modelCard(w) })', { esc: String, h: hero, w: { id: 'worker', model: 'gpt-5.5', provider: 'codex' } });
+  // SAVE MODEL with an advanced typed model and a blank provider field: the hero keeps a provider (a null one let
+  // relaunch fall back to the save root's provider); a specialist's blank provider still means "follow".
+  A.eq(ctx.setAgentModelPin('agent', 'grok-typed', '', ''), true, 'a typed hero model with a blank provider saves');
+  A.eq([hero.model, hero.provider, H.prov], ['grok-typed', 'grok', 'grok'], 'the hero keeps its own provider');
+  hero.provider = null;
+  ctx.setAgentModelPin('agent', 'grok-typed-2', '', '');
+  A.eq(hero.provider, 'grok', 'a provider-less hero takes the live provider rather than null');
+  ctx.setAgentModelPin('worker', 'typed-worker-model', '', '');
+  A.eq(worker.provider, null, 'a specialist\'s blank provider stays unset (follows the station)');
+  const shell = o => '<picker inherit="' + o.inheritLabel + '">';
+  const card = vm.runInNewContext(fn(ui, '  function modelCard(') + '\n({ hero: modelCard(h), worker: modelCard(w) })', { esc: String, ModelPicker: { shellHTML: shell }, h: hero, w: { id: 'worker', model: 'gpt-5.5', provider: 'codex' } });
   A.ok(!/id="ag-model-clear"/.test(card.hero), 'the hero dossier offers no FOLLOW STATION DEFAULT');
   A.ok(/id="ag-model-clear"/.test(card.worker), 'a pinned specialist keeps FOLLOW STATION DEFAULT');
+  A.ok(!/Follow station default/i.test(card.hero), 'the hero picker and copy never offer "Follow station default"');
+  A.ok(/inherit="Follow station default"/.test(card.worker) && /clears the pin/.test(card.worker), 'a specialist keeps the follow option and its copy');
+  A.ok(/the Commander always needs a model/.test(fn(ui, '  function wireConfig(')), 'an empty hero SAVE MODEL names why instead of the generic failure');
+}
+
+/* ---- recovery WAKE: the effort picked on the connect screen rides the resumed hero ---- */
+{
+  const start = app.indexOf('    if (resumingSaved) {\n      const s = resumingSaved;');
+  const tail = 'resumeInto(s); return true;';
+  const end = app.indexOf(tail, start);
+  A.ok(start > 0 && end > start && end - start < 1200, 'the WAKE resume branch is where the test expects it');
+  const H = harnessDouble('grok');
+  H.getReasoningEffort = () => H.efforts[H.prov];
+  H.efforts.grok = 'low';   // the connect screen (overseer-setup) wrote the new provider's effort into Harness only
+  let resumed = null;
+  const saved = { prov: 'codex', reasoningEffort: 'high', agent: { id: 'agent', name: 'HERO', model: 'gpt-5.5', provider: 'codex', reasoningEffort: 'high', onboarded: true } };
+  vm.runInNewContext('(function () {' + app.slice(start, end + tail.length) + '\n    }\n})()', { resumingSaved: saved, Harness: H, model: 'grok-4.7', resumeInto: s => { resumed = s; } });
+  A.eq([resumed.agent.provider, resumed.agent.model, resumed.agent.reasoningEffort], ['grok', 'grok-4.7', 'low'], 'WAKE stamps the chosen provider, model AND effort onto the hero');
+  const r = resume(resumed);
+  A.eq([r.H.prov, r.H.efforts.grok], ['grok', 'low'], 'the resumed grok scope gets the picked LOW, not the old codex HIGH');
 }
 
 /* ---- frontend mirrors of the sidecar registry ---- */

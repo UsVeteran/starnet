@@ -298,6 +298,57 @@ module.exports = (async () => {
     A.eq(JSON.parse(posts()[2].init.body).stream_options, undefined, 'remembered drop keeps the param off the wire');
   }
 
+  // REASONING-EFFORT REQUEST GUARD. The model dock's effort clamp is display-only, so a saved 'high' reaches the
+  // adapter even for a model the dock shows as OFF (a specialist loadout on an Ollama hero). Through the REAL
+  // registry profiles: a rejection that never spells `reasoning_effort` still drops it and retries, and a row the
+  // catalog declares non-reasoning never carries it at all.
+  {
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    const okStream = () => new Response('data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    const rig = (reject, models) => {
+      const posts = [];
+      const fetch = async (url, init) => {
+        if (!init || init.method !== 'POST') return models ? new Response(JSON.stringify({ data: models }), { status: 200 }) : new Response('forbidden', { status: 403 });
+        const body = JSON.parse(init.body);
+        posts.push(body);
+        return (body.reasoning_effort !== undefined && reject(body)) || okStream();
+      };
+      return { posts, fetch };
+    };
+    const texts = evs => evs.filter(e => e.type === 'text').map(e => e.delta).join('');
+
+    // Ollama: the exact 400 a live Ollama 0.32 returns for a non-thinking model sent reasoning_effort
+    const ol = rig(b => b.model === 'llama3.1:8b' && new Response(JSON.stringify({ error: { message: '"llama3.1:8b" does not support thinking', type: 'invalid_request_error' } }), { status: 400 }),
+      [{ id: 'llama3.1:8b', object: 'model' }, { id: 'qwen3:14b', object: 'model' }]);
+    const ollama = selectProvider({ provider: 'ollama', fetch: ol.fetch });
+    A.eq(texts(await collect(ollama, { model: 'llama3.1:8b', messages: [], reasoningEffort: 'high' })), 'hi', 'an Ollama non-thinking model given HIGH still answers (no hard 400)');
+    A.eq(ol.posts.map(b => b.reasoning_effort), ['high', undefined], '"does not support thinking" drops reasoning_effort and retries once');
+    await collect(ollama, { model: 'llama3.1:8b', messages: [], reasoningEffort: 'high' });
+    A.eq(ol.posts.length, 3, 'the drop is remembered for that model');
+    A.eq(ol.posts[2].reasoning_effort, undefined, 'a remembered drop keeps reasoning_effort off the wire');
+    await collect(ollama, { model: 'qwen3:14b', messages: [], reasoningEffort: 'high' });
+    A.eq(ol.posts[3].reasoning_effort, 'high', 'a thinking Ollama model still receives the effort');
+
+    // xAI names the param camelCase
+    const xa = rig(b => new Response(JSON.stringify({ code: 'Client specified an invalid argument', error: 'Model ' + b.model + ' does not support parameter reasoningEffort.' }), { status: 400 }));
+    await collect(selectProvider({ provider: 'xai', fetch: xa.fetch, key: 'fixture-only' }), { model: 'grok-3', messages: [], reasoningEffort: 'low' });
+    A.eq(xa.posts.map(b => b.reasoning_effort), ['low', undefined], 'an xAI `reasoningEffort` rejection drops reasoning_effort and retries');
+
+    // rows the registry declares non-reasoning: no reasoning_effort on the wire, and no effort dial advertised
+    const never = () => new Response(JSON.stringify({ error: { message: 'reasoning_effort sent to a non-reasoning row' } }), { status: 400 });
+    for (const [provider, plain, thinking, auth] of [['perplexity', 'sonar', 'sonar-reasoning-pro', { key: 'fixture-only' }], ['grok', 'grok-3', 'grok-4.7', { token: 'fixture-only' }]]) {
+      const r = rig(never);
+      const p = selectProvider(Object.assign({ provider, fetch: r.fetch }, auth));
+      await p.listModels();   // /models fails → the registry's static roster (explicit supportsReasoning per row)
+      await collect(p, { model: plain, messages: [], reasoningEffort: 'high' });
+      A.eq(r.posts.map(b => b.reasoning_effort), [undefined], provider + ' ' + plain + ' (supportsReasoning:false) never sends reasoning_effort');
+      A.eq(p.reasoningEfforts(plain), ['none'], provider + ' ' + plain + ' advertises only reasoning off');
+      await collect(p, { model: thinking, messages: [], reasoningEffort: 'high' });
+      A.eq(r.posts[1].reasoning_effort, 'high', provider + ' ' + thinking + ' (reasoning row) still sends the effort');
+      A.ok(p.reasoningEfforts(thinking).indexOf('high') >= 0, provider + ' ' + thinking + ' keeps its effort dial');
+    }
+  }
+
   // tools are NEVER silently dropped - a provider that rejects tools must fail the run honestly
   {
     const calls = [];

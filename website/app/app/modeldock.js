@@ -407,7 +407,10 @@ const ModelDock = (() => {
 
   // DISPLAY-ONLY clamp. Writing the clamp back into Harness on every reflect let one OFF-only catalog render
   // (grok's live rows before they carried efforts) persist 'none' over the saved effort. Only explicit choices
-  // (applyModel / applyEffort) write; the sidecar adapters clamp or omit an effort a model can't take.
+  // (applyModel / applyEffort) write, so the SAVED effort is what runs send. The request-path guard is the
+  // sidecar's: non-reasoning rows are served OFF-only, the openai-compatible adapter never sends reasoning_effort
+  // to a row declared non-reasoning, and it drops + retries when an endpoint rejects it (Ollama's non-thinking
+  // models, xAI's reasoningEffort) — it does NOT map the saved effort onto what this chip shows.
   function ensureCurrentEffort() {
     return clampEffortForModel(currentEffort(), currentModelItem());
   }
