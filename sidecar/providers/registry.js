@@ -90,6 +90,9 @@
       keyRequired: false,
       modelsRequireAuth: true,
       maxTools: 340,   // wire-tool budget: xAI rejects a request carrying >350 tools ("Maximum tools limit reached")
+      // SuperGrok is quota-metered: ~380 connector schemas re-sent every turn burned the included usage. Granted
+      // connector tools wait behind tool.search, which reveals them on demand (capability/wire-plan.js).
+      deferConnectorTools: true,
       baseUrl: 'https://cli-chat-proxy.grok.com/v1',
       // Required by cli-chat-proxy — without these, chat returns 426 or spending-limit errors. The ONLY copy:
       // the factory applies it to every grok request (chat, /models, fallbacks).

@@ -157,6 +157,8 @@ module.exports = (async () => {
     A.ok(grokRoster.find(m => m.id === 'grok-4.7'), 'grok static roster carries grok-4.7');
     A.eq(grok.maxTools, 340, 'grok declares the xAI wire-tool budget (limit 350)');
     A.eq(factory.getProviderProfile('xai').maxTools, 340, 'the API-key xAI shares the wire-tool budget');
+    A.eq(grok.deferConnectorTools, true, 'grok (quota-metered SuperGrok) holds connector tools behind tool.search');
+    A.eq(factory.listProviderProfiles({ public: false, includeInactive: true }).filter(p => p.deferConnectorTools).map(p => p.id), ['grok'], 'connector deferral is grok-only — every other provider keeps connectors on the wire');
     A.eq(factory.defaultReasoningEffortForProvider('grok'), 'low', 'grok (SuperGrok subscription) defaults to low reasoning');
     A.eq(factory.defaultReasoningEffortForProvider('xai'), 'medium', 'API-key xAI default reasoning unchanged');
   }
