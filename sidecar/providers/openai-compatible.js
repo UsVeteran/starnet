@@ -20,14 +20,52 @@
   // them. `tools` is deliberately NOT in this list: silently removing tools would let a task run proceed
   // without the capability it needs (the run must fail honestly instead).
   const DROPPABLE_PARAMS = ['stream_options', 'parallel_tool_calls', 'tool_choice', 'reasoning_effort', 'max_tokens'];
+  // Rejections that refuse a param without spelling its wire name: xAI names it camelCase (`reasoningEffort`), and
+  // Ollama refuses a non-thinking model outright ('"llama3.1:8b" does not support thinking') — a hard 400 on every
+  // turn unless the effort is dropped. Params absent here match their wire name only.
+  const PARAM_REJECTIONS = { reasoning_effort: /reasoning_?effort|does not support thinking/i };
   // The chat-completions wire accepts this effort scale; StarNet's wider scale (xhigh/max) clamps into it.
   const WIRE_EFFORTS = ['minimal', 'low', 'medium', 'high'];
-  function wireEffort(value) {
+  // A row whose catalog declares reasoning_efforts (xAI shape, see catalogEfforts) is held to that list instead:
+  // 'xhigh' rides the wire only when declared (grok-4.7 declares low..xhigh), and a level it lacks ('minimal') maps
+  // to the nearest one it has. Rows without that declaration keep the clamp above byte-for-byte.
+  const EFFORT_LADDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const DECLARED_WIRE = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+  function effortName(value) {
     const v = String(value || '').trim().toLowerCase();
-    if (!v || v === 'none' || v === 'off') return '';
-    if (v === 'xhigh' || v === 'max' || v === 'extrahigh') return 'high';
-    if (v === 'min') return 'minimal';
-    return WIRE_EFFORTS.indexOf(v) >= 0 ? v : 'medium';
+    return v === 'off' ? 'none' : v === 'min' ? 'minimal' : v === 'extrahigh' ? 'xhigh' : v;
+  }
+  function wireEffort(value, declared) {
+    const v = String(value || '').trim().toLowerCase();
+    const allowed = Array.isArray(declared) ? DECLARED_WIRE.filter(e => declared.some(d => effortName(d) === e)) : [];
+    // OFF on a row that declares no 'none' (grok-4.7 always reasons): omitting the param would hand the choice to
+    // the server default (xAI: high), the opposite of OFF — send the lowest level the model declares instead.
+    if (v === 'none' || v === 'off') return (allowed.length && !declared.some(d => effortName(d) === 'none')) ? allowed[0] : '';
+    if (!v) return '';
+    if (!allowed.length) {
+      if (v === 'xhigh' || v === 'max' || v === 'extrahigh') return 'high';
+      if (v === 'min') return 'minimal';
+      return WIRE_EFFORTS.indexOf(v) >= 0 ? v : 'medium';
+    }
+    let want = effortName(v === 'max' ? 'xhigh' : v);
+    if (DECLARED_WIRE.indexOf(want) < 0) want = 'medium';
+    const idx = DECLARED_WIRE.indexOf(want);
+    // nearest declared level: never above the requested effort when a lower one exists, else the next one up
+    for (let i = idx; i >= 0; i--) if (allowed.indexOf(DECLARED_WIRE[i]) >= 0) return DECLARED_WIRE[i];
+    for (let i = idx + 1; i < DECLARED_WIRE.length; i++) if (allowed.indexOf(DECLARED_WIRE[i]) >= 0) return DECLARED_WIRE[i];
+    return allowed[0];
+  }
+  /* xAI's Grok-CLI catalog (cli-chat-proxy /v1/models, 2026-09-25) declares efforts as objects —
+     reasoning_efforts: [{id:'xhigh', value:'xhigh', label:'Extra High', default:false}, …] — beside
+     supports_reasoning_effort:true. Read `value` (then `id`), keep only known levels, order low -> high. */
+  function catalogEfforts(list) {
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    for (const e of list) {
+      const name = effortName(e && typeof e === 'object' ? (e.value || e.id) : e);
+      if (EFFORT_LADDER.indexOf(name) >= 0) seen.add(name);
+    }
+    return EFFORT_LADDER.filter(e => seen.has(e));
   }
 
   // NO default endpoint. This adapter used to fall back to https://api.openai.com/v1 on an empty baseUrl,
@@ -64,6 +102,15 @@
     }
     return '';
   }
+  /* A flat string `error`, joined to its OAuth-style `error_description` when present:
+     {error:"invalid_token", error_description:"The access token expired"} -> "invalid_token: The access token
+     expired" (the token alone dropped the only human words). '' when `error` is not a non-empty string. */
+  function flatErrorText(data) {
+    const e = data && data.error;
+    if (typeof e !== 'string' || !e) return '';
+    const desc = typeof data.error_description === 'string' ? data.error_description.trim() : '';
+    return desc ? e + ': ' + desc : e;
+  }
   async function responseErrorDetail(res) {
     let data = null;
     let text = '';
@@ -75,9 +122,16 @@
       try { data = await res.json(); } catch (_) { data = null; }
     }
     const e = data && data.error;
-    const message = safeErrorField((e && e.message) || (data && data.message) || text || res.statusText || ('HTTP ' + res.status), 500);
+    /* FLAT BODIES (xAI): {code:'subscription:free-usage-exhausted', error:"You've used all the included free
+       usage…"} carries its sentence IN `error` and its code at the top level. Reading only error.{message,code}
+       left providerCode '' and put the raw JSON in front of the user. Object-shaped `error` bodies keep the
+       exact reads below; the flat fallbacks only apply when `error` is a string or absent. A top-level `message`
+       still wins over a string `error` — {error:"unauthorized", message:"<sentence>"} is a code token beside
+       the sentence (see flatErrorText). */
+    const flat = !(e && typeof e === 'object');
+    const message = safeErrorField((e && e.message) || (data && data.message) || flatErrorText(data) || text || res.statusText || ('HTTP ' + res.status), 500);
     const type = safeErrorField(e && e.type, 80);
-    const code = safeErrorField(e && e.code, 80);
+    const code = safeErrorField(flat ? (data ? data.code : undefined) : e.code, 80);
     // OpenRouter places provider identity in metadata; raw metadata is deliberately ignored because it may
     // contain provider payloads or user content. The managed proxy promotes only this allowlisted field.
     const providerName = safeErrorField((e && e.provider) || (e && e.metadata && (e.metadata.provider_name || e.metadata.provider)), 100);
@@ -101,7 +155,10 @@
     const id = (m && (m.id || m.name || m.model)) ? String(m.id || m.name || m.model) : '';
     if (!id) return null;
     const params = Array.isArray(m.supported_parameters) ? m.supported_parameters.slice() : [];
-    return {
+    // camelCase reasoningEfforts keeps its exact pre-existing handling; only an xAI-shape reasoning_efforts list
+    // (no camelCase list beside it) is parsed, and only such a row holds the wire to its declared levels.
+    const declared = Array.isArray(m.reasoningEfforts) ? null : catalogEfforts(m.reasoning_efforts);
+    const row = {
       id,
       name: m.name || id,
       context_length: Number(m.context_length || m.context_window || m.max_context_window || 0) || 0,
@@ -109,9 +166,12 @@
       pricing: m.pricing || null,
       supported_parameters: params,
       supportsTools: typeof m.supportsTools === 'boolean' ? m.supportsTools : (params.length ? params.indexOf('tools') >= 0 : null),
-      supportsReasoning: typeof m.supportsReasoning === 'boolean' ? m.supportsReasoning : null,
-      reasoningEfforts: Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts.slice() : []
+      supportsReasoning: typeof m.supportsReasoning === 'boolean' ? m.supportsReasoning
+        : (typeof m.supports_reasoning_effort === 'boolean' ? m.supports_reasoning_effort : null),
+      reasoningEfforts: declared || m.reasoningEfforts.slice()
     };
+    if (declared && declared.length) row.catalogEfforts = true;
+    return row;
   }
 
   function makeOpenAICompatibleProvider(opts) {
@@ -163,6 +223,11 @@
     // /v1/models lists Agent-API models, not its chat-completions roster). Used only when the
     // live endpoint yields nothing — a real catalog always wins.
     const staticModels = Array.isArray(opts.staticModels) ? opts.staticModels.map(normalizeModel).filter(Boolean) : [];
+    // staticModelsFallback: the roster is only an OFFLINE seed for an endpoint that HAS a live catalog (grok/kimi
+    // OAuth). Substituted rows then carry `fallback: true` (codex's honesty marker), so the probe and the model dock
+    // never read a failed /models as a confirmed catalog — a confirmed one lets the dock clear a saved model it
+    // doesn't list. Off for an authoritative roster (Perplexity), which stays a real catalog.
+    const staticFallback = opts.staticModelsFallback === true;
     const droppedParams = new Map();   // model -> Set(param) learned from unsupported-param 400s
     let catalog = null;
     let catalogPromise = null;
@@ -182,7 +247,7 @@
       const text = String(detail || '').toLowerCase();
       for (const p of DROPPABLE_PARAMS) {
         if (body[p] === undefined) continue;
-        if (text.indexOf(p) >= 0) { delete body[p]; rememberDrop(body.model, p); return p; }
+        if (PARAM_REJECTIONS[p] ? PARAM_REJECTIONS[p].test(text) : text.indexOf(p) >= 0) { delete body[p]; rememberDrop(body.model, p); return p; }
       }
       return null;
     }
@@ -227,12 +292,13 @@
            for saved drop-state from older builds). */
       }
       // reasoning_effort goes on the wire only when the model provably reasons (catalog) or the provider
-      // profile documents the param; effort 'none' means omit it entirely.
-      const effort = wireEffort(req.reasoningEffort || defaultEffort);
+      // profile documents the param — never to a row declared non-reasoning (supportsReasoning:false — seed grok-3, sonar); effort
+      // 'none' means omit it entirely. The UI's effort clamp is display-only, so this is the request-path guard.
+      const m = findModel(req.model);
+      const effort = wireEffort(req.reasoningEffort || defaultEffort, m && m.catalogEfforts ? m.reasoningEfforts : null);
       if (effort && !skip('reasoning_effort')) {
-        const m = findModel(req.model);
         const modelReasons = !!(m && (m.supportsReasoning === true || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)));
-        if (modelReasons || sendReasoningEffort) body.reasoning_effort = effort;
+        if (modelReasons || (sendReasoningEffort && !deniesReasoning(m))) body.reasoning_effort = effort;
       }
       let res;
       try { res = await requestWithRetry(body, req.signal); }
@@ -281,7 +347,19 @@
         try { return { json: JSON.parse(data) }; } catch (_) { return null; }
       }
       function* emitFrom(j) {
-        if (j.error) throw new Error((j.error && (j.error.message || j.error.code)) || 'provider stream error');
+        if (j.error) {
+          // a flat in-stream error ({error:"<sentence>", code}) keeps its words instead of 'provider stream error',
+          // read with the pre-stream precedence (a top-level `message` beats a string `error` token) and labeled
+          // like the pre-stream error so the UI can tell WHICH provider failed (GROK OAUTH copy keys on the label)
+          if (typeof j.error === 'string') {
+            const words = safeErrorField((typeof j.message === 'string' && j.message) || flatErrorText(j), 500);
+            const se = new Error(errLabel + ' stream error: ' + (words || 'unknown'));
+            const sc = safeErrorField(j.code, 80);
+            if (sc) se.providerCode = sc;
+            throw se;
+          }
+          throw new Error((j.error && (j.error.message || j.error.code)) || 'provider stream error');
+        }
         if (j.usage) yield { type: 'usage', usage: j.usage };
         const choice = j.choices && j.choices[0];
         if (!choice) return;
@@ -417,7 +495,7 @@
       catalog = await catalogPromise;
       if (!catalog.length) {
         catalogPromise = null;
-        if (staticModels.length) catalog = staticModels.slice();
+        if (staticModels.length) catalog = staticFallback ? staticModels.map(m => Object.assign({}, m, { fallback: true })) : staticModels.slice();
       }
       return catalog;
     }
@@ -431,6 +509,8 @@
       });
     }
     function findModel(id) { return catalog ? catalog.find(m => m.id === id) : null; }
+    // a catalog row that explicitly says it cannot reason and declares no effort list (unknown rows stay null)
+    function deniesReasoning(m) { return !!(m && m.supportsReasoning === false && !(Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)); }
     function contextLimit(id) { const m = findModel(id); return (m && m.context_length) || defaultContext; }
     function catalogPriceOf(id) {
       const m = findModel(id);
@@ -455,12 +535,12 @@
     function reasoningEfforts(id) {
       const m = findModel(id);
       if (m && Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length) return m.reasoningEfforts.slice();
-      if ((m && m.supportsReasoning === true) || sendReasoningEffort) return ['none'].concat(WIRE_EFFORTS);
+      if ((m && m.supportsReasoning === true) || (sendReasoningEffort && !deniesReasoning(m))) return ['none'].concat(WIRE_EFFORTS);
       return ['none'];
     }
 
     return { stream, listModels, contextLimit, priceOf, supportsTools, reasoningEfforts };
   }
 
-  return { makeOpenAICompatibleProvider, _internals: { normalizeModel, cleanBaseUrl, responseErrorDetail, safeErrorField } };
+  return { makeOpenAICompatibleProvider, _internals: { normalizeModel, wireEffort, cleanBaseUrl, responseErrorDetail, safeErrorField } };
 });

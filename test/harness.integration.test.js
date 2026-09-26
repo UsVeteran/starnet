@@ -40,6 +40,7 @@ const { makeRoutineTools } = require('../sidecar/tools/builtin/routines.js');
 const { makeQuestStore } = require('../sidecar/quest-store.js');
 const { resolveTools } = require('../sidecar/capability/resolve.js');
 const { makeCapCtx } = require('../sidecar/capability/capGate.js');
+const { planWireTools } = require('../sidecar/capability/wire-plan.js');
 const { makeConsentBroker } = require('../sidecar/permissions.js');
 const { renderRecall, injectRecall, rank } = require('../sidecar/context.js');
 
@@ -159,8 +160,10 @@ const fixture = {
   A.ok(resolved.deferred.indexOf('browser.network') >= 0, 'the specialist tail IS deferred');
   A.ok(resolved.deferred.indexOf('browser.upload') >= 0, 'and so is the rest of it');
 
-  const deferredNames = new Set(resolved.deferred);
-  const coreNames = resolved.tools.filter(n => !deferredNames.has(n));
+  // The host's own split (capability/wire-plan.js): uncapped, no connector deferral — the plain CORE/DEFERRED cut.
+  const plan = planWireTools({ tools: resolved.tools, deferred: resolved.deferred });
+  const deferredNames = new Set(plan.deferred);
+  const coreNames = plan.core;
   const toolDefs = registry.wireFormat(registry.list(new Set(coreNames)));
   const deferredToolDefs = registry.wireFormat(registry.list(deferredNames));
   A.ok(toolDefs.length < resolved.tools.length, 'the advertised list is smaller than the granted list');

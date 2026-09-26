@@ -14,7 +14,7 @@ async function scenario(savedModel, catalog, switchFrom, duringFetch, options = 
   let revision = 0, identity = 'agent';
   let model = savedModel;
   let provider = switchFrom || targetProvider;
-  let effort = 'medium';
+  let effort = options.effort || 'medium', effortWrites = 0;
   const applied = [];
   const old = { document: global.document, localStorage: global.localStorage, Harness: global.Harness, U: global.U };
   global.document = {
@@ -33,7 +33,7 @@ async function scenario(savedModel, catalog, switchFrom, duringFetch, options = 
     getModel: () => model,
     setModel: v => { revision++; model = v; },
     getReasoningEffort: () => effort,
-    setReasoningEffort: v => { effort = v; },
+    setReasoningEffort: v => { effortWrites++; effort = v; },
     normalizeReasoningEffort: v => String(v || 'medium'),
     configured: p => p === targetProvider,
     getKey: () => '',
@@ -61,7 +61,8 @@ async function scenario(savedModel, catalog, switchFrom, duringFetch, options = 
       await ModelDock.reconcile();
     }
     for (let i = 0; i < 100 && !applied.length; i++) await sleep(5);
-    return { model, provider, effort, applied, rows: await ModelDock.catalog(), internals: ModelDock._internals };
+    const clamped = ModelDock.efforts.clamp(effort, (await ModelDock.catalog()).find(m => m.id === model) || { id: model, provider });
+    return { model, provider, effort, effortWrites, clamped, applied, rows: await ModelDock.catalog(), internals: ModelDock._internals };
   } finally {
     delete require.cache[require.resolve(dockPath)];
     global.document = old.document;
@@ -149,6 +150,35 @@ module.exports = (async () => {
     const confirmed = await scenario('removed-model', [], null, null, { provider });
     A.eq(confirmed.model, '', provider + ' confirmed empty catalog still clears a removed model');
   }
+  // Reasoning effort drift: reflect() used to WRITE its display clamp into Harness, so a render of OFF-only rows
+  // (grok's live catalog before rows carried efforts) persisted 'none' over the saved effort. The clamp is display-only now.
+  const WIRE = ['none', 'minimal', 'low', 'medium', 'high'];
+  const grokRows = [{ id: 'grok-4.7', supportsReasoning: false, reasoningEfforts: WIRE }, { id: 'grok-4', supportsReasoning: false, reasoningEfforts: WIRE }];
+  const grok = await scenario('grok-4.7', grokRows, null, null, { provider: 'grok', effort: 'low' });
+  A.eq(grok.effort, 'low', 'grok rows serialized supportsReasoning:false keep the saved LOW effort through reflect');
+  A.eq(grok.clamped, 'low', 'the dock shows LOW for a grok row that carries the wire efforts');
+  A.eq(grok.effortWrites, 0, 'reflect never writes reasoning effort');
+  const offOnly = await scenario('grok-4.7', [{ id: 'grok-4.7', supportsReasoning: false }], null, null, { provider: 'grok', effort: 'low' });
+  // The saved effort therefore still reaches the sidecar for an OFF-only row; the request-path guard lives there
+  // (provider.openai-compatible.test: REASONING-EFFORT REQUEST GUARD; model-catalog-truth: OFF-only serving).
+  A.eq(offOnly.clamped, 'none', 'an OFF-only row still DISPLAYS as off');
+  A.eq(offOnly.effort, 'low', '…but the display clamp no longer overwrites the saved effort');
+  A.eq(offOnly.effortWrites, 0, 'no Harness effort write from a catalog render');
+  // The live grok-4.7 row as the sidecar now serves it (declared low..xhigh, no OFF): the saved LOW shows as LOW,
+  // MAX reaches the declared xhigh, and a saved OFF from another model only DISPLAYS as the nearest declared level.
+  const grokLive = [{ id: 'grok-4.7', name: 'Grok 4.7', context_length: 500000, supportsReasoning: true, reasoningEfforts: ['low', 'medium', 'high', 'xhigh'] }];
+  const grokLiveRun = await scenario('grok-4.7', grokLive, null, null, { provider: 'grok', effort: 'low' });
+  A.eq([grokLiveRun.model, grokLiveRun.effort, grokLiveRun.clamped, grokLiveRun.effortWrites], ['grok-4.7', 'low', 'low', 0], 'the live grok-4.7 row keeps the saved LOW');
+  const liveRow = grokLiveRun.rows.find(m => m.id === 'grok-4.7');
+  A.eq(grokLiveRun.internals.reasoningPresetsFor(liveRow).map(p => p.effort), ['low', 'medium', 'high', 'xhigh'], 'grok-4.7 presets span exactly its declared levels, MAX = xhigh');
+  const liveOff = await scenario('grok-4.7', grokLive, null, null, { provider: 'grok', effort: 'none' });
+  A.eq([liveOff.clamped, liveOff.effort, liveOff.effortWrites], ['low', 'none', 0], 'a saved OFF displays as the nearest declared level without being rewritten');
+  // The sidecar now serves a failed grok /models as its static roster marked fallback: never a confirmed catalog.
+  const grokSeed = grokRows.map(m => Object.assign({ fallback: true }, m));
+  const seededGrok = await scenario('grok-custom-pin', grokSeed, null, null, { provider: 'grok', effort: 'low' });
+  A.eq(seededGrok.model, 'grok-custom-pin', 'grok fallback rows do not clear a saved model they do not list');
+  A.eq(seededGrok.applied.length, 0, 'grok fallback rows never persist a blank model');
+  A.eq(seededGrok.effort, 'low', 'grok fallback rows leave the saved effort alone');
   await overlappingCatalogs();
   A.report('model-provider-reconcile.test');
 })().catch(e => { console.error(e); process.exitCode = 1; });

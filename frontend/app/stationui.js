@@ -2480,17 +2480,18 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
     const model = (a && a.model) ? String(a.model) : '';
     const prov = (a && a.provider) ? String(a.provider) : '';
     const pinned = !!model;
+    const hero = !!(a && a.id === 'agent');   // the hero IS the station default: it has no pin to clear
     // PRIMARY control: the shared ModelPicker (grouped catalog + effort), preselected + populated in wireConfig.
     // FALLBACK (when the component is unavailable): the original free-text model/provider inputs, always present in
     // an <details> as an escape hatch for a model id that isn't in the catalog. SAVE reads the picker first.
     const hasPicker = (typeof ModelPicker !== 'undefined');
     const picker = hasPicker
       ? '<div class="set-row mc-pick-row"><label for="ag-model-pick-model">MODEL</label>' +
-          '<div class="mc-pick" id="ag-model-pick">' + ModelPicker.shellHTML({ id: 'ag-model-pick', inheritLabel: 'Follow station default', ariaLabel: 'Agent model', effort: true }) + '</div></div>'
+          '<div class="mc-pick" id="ag-model-pick">' + ModelPicker.shellHTML({ id: 'ag-model-pick', inheritLabel: hero ? 'Choose a model' : 'Follow station default', ariaLabel: 'Agent model', effort: true }) + '</div></div>'
       : '';
     return '<div class="cf-card" id="ag-model-card">' +
       '<div class="cf-head"><span class="cf-file">▣ model</span></div>' +
-      '<div class="cf-desc">What this agent runs on. Pick a model to run this agent on it everywhere — chat, delegated work, scheduled routines — independent of the station default in the COMMS dock. “Follow station default” clears the pin. Choose SAVE MODEL to apply your selection.</div>' +
+      '<div class="cf-desc">What this agent runs on. Pick a model to run this agent on it everywhere — chat, delegated work, scheduled routines — independent of the station default in the COMMS dock.' + (hero ? '' : ' “Follow station default” clears the pin.') + ' Choose SAVE MODEL to apply your selection.</div>' +
       picker +
       '<details class="mc-adv"' + ((pinned && !hasPicker) ? ' open' : '') + '><summary>advanced — type a model id</summary>' +
         '<div class="set-row"><label for="ag-model-in">MODEL</label><input id="ag-model-in" class="key-input" type="text" spellcheck="false" autocomplete="off" placeholder="e.g. anthropic/claude-sonnet-4-5" value="' + esc(model) + '"></div>' +
@@ -2499,7 +2500,8 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       '<div class="mc-hint">' + (pinned ? 'pinned — this agent ignores the station default' : 'following the station default') + '</div>' +
       '<div class="mc-acts">' +
         '<button class="bb sm" id="ag-model-save">SAVE MODEL</button>' +
-        (pinned ? '<button class="bb xs" id="ag-model-clear" title="run this agent on the station default model again">FOLLOW STATION DEFAULT</button>' : '') +
+        // the hero IS the station default (App refuses to clear its pin), so it gets no FOLLOW button
+        ((pinned && !hero) ? '<button class="bb xs" id="ag-model-clear" title="run this agent on the station default model again">FOLLOW STATION DEFAULT</button>' : '') +
       '</div>' +
       '<div id="ag-model-msg" class="msg"></div>' +
     '</div>';
@@ -2567,6 +2569,7 @@ const StationUI = typeof document === 'undefined' ? {} : (() => {
       const advProv = ((body.querySelector('#ag-prov-in') || {}).value || '').trim();
       const model = pick.model || advModel;
       const provider = pick.model ? pick.provider : (advModel ? advProv : '');
+      if (!model && a && a.id === 'agent') { setMMsg('the Commander always needs a model — pick one to save'); sfx('bad'); return; }
       // effort belongs to the PICKED model only — never let an effort left in the select leak onto a typed
       // advanced model (or onto a cleared pin). onChange above already keeps pick.effort valid for pick.model.
       applyModel(model, provider, pick.model ? (pick.effort || '') : '');

@@ -46,6 +46,24 @@
     return Number.isFinite(declared) && declared > 0 ? declared : 0;
   }
 
+  // A profile's static extraHeaders, with any extraHeadersEnv override applied ({ header: [envName, ...] },
+  // first valid value wins). Values are validated at this boundary — visible ASCII, no whitespace, ≤64 chars —
+  // so CR/LF header injection or junk keeps the declared default instead of reaching the wire.
+  const HEADER_OVERRIDE_RE = /^[\x21-\x7e]{1,64}$/;
+  function resolveExtraHeaders(profile) {
+    if (!profile || !profile.extraHeaders) return undefined;
+    const headers = Object.assign({}, profile.extraHeaders);
+    const env = (typeof process !== 'undefined' && process.env) || {};
+    const overrides = profile.extraHeadersEnv || {};
+    for (const name of Object.keys(overrides)) {
+      for (const envName of [].concat(overrides[name] || [])) {
+        const value = String(env[envName] || '').trim();
+        if (value && HEADER_OVERRIDE_RE.test(value)) { headers[name] = value; break; }
+      }
+    }
+    return headers;
+  }
+
   function selectProvider(opts) {
     opts = opts || {};
     // Configured OAuth fallbacks need metadata at admission, but authentication only if used.
@@ -132,8 +150,9 @@
           ? 'STARNET is not linked on this station — link it in SETTINGS to run on credits (relink if you recently unlinked or reinstalled)'
           : 'provider ' + id + ' has no endpoint configured (base URL missing)');
       }
-      const mergedHeaders = (profile.extraHeaders || opts.headers)
-        ? Object.assign({}, profile.extraHeaders || {}, opts.headers || {})
+      const profileHeaders = resolveExtraHeaders(profile);
+      const mergedHeaders = (profileHeaders || opts.headers)
+        ? Object.assign({}, profileHeaders || {}, opts.headers || {})
         : undefined;
       return openaiCompatible.makeOpenAICompatibleProvider({
         fetch: opts.fetch,
@@ -154,6 +173,8 @@
         // wireStreamOptions:false = endpoint rejects/lacks stream_options (usage streams by default there)
         includeUsage: profile.wireStreamOptions === false ? false : opts.includeUsage,
         staticModels: profile.staticModels,
+        // true = the static roster is an offline seed (rows served as fallback), not the endpoint's real catalog
+        staticModelsFallback: profile.staticModelsFallback === true,
         // prices.js family for endpoints whose /models carries no pricing (null = stays honestly unpriced)
         priceFamily: (typeof profile.priceFamily === 'string') ? profile.priceFamily : null,
         // Local runtimes may need to load a model before returning headers. Hosted providers retain the

@@ -361,4 +361,57 @@ const F = (err, status, opts) => friendlyError(err, status, opts);
   A.eq(R({ status: 429, code: 'insufficient_quota', message: 'x' }).reason, 'billing', 'the code form too');
 }
 
+/* ---- xAI: a spent SuperGrok allowance and an empty API-key wallet are TERMINAL, not busy moments ----
+   xAI answers both as 429 with a FLAT body ({code, error:"<sentence>"}); openai-compatible.js lifts the code into
+   err.providerCode. Neither matched before: the 429 read as rate_limit, the adapter retried with backoff, and cron
+   re-fired every 90s against a meter no wait refills. */
+{
+  const grok429 = (detail, providerCode) => Object.assign(new Error('Grok (xAI) http 429 - ' + detail), { status: 429, providerCode });
+  const q = R(grok429("[code subscription:free-usage-exhausted] You've used all the included free usage for model grok-4.7. It is not available until you enable Extra Usage.", 'subscription:free-usage-exhausted'));
+  A.eq(q.reason, 'quota_exhausted', 'the live xAI free-usage 429 is a spent allowance');
+  A.eq(q.retryable, false, 'and never burns a doomed retry');
+  A.eq(q.shouldFallback, true, 'while another provider can still pick the work up');
+  A.ok(/used all the included free usage/.test(q.message), 'the human sentence is what the run error carries');
+  // the structured code alone decides it (err.providerCode is consulted, not only body.error.code)
+  const codeOnly = R(grok429('request rejected', 'subscription:free-usage-exhausted'));
+  A.eq(codeOnly.reason, 'quota_exhausted', 'providerCode subscription:free-usage-exhausted alone -> quota_exhausted');
+  A.eq(codeOnly.retryable, false, 'providerCode-only verdict is not retryable');
+  A.eq(R(Object.assign(new Error('stream rejected'), { providerCode: 'subscription:free-usage-exhausted' })).reason, 'quota_exhausted',
+    'a status-less (in-stream) error consults providerCode too');
+  // ...and the sentence alone, in either wording
+  A.eq(R(httpErr(429, "You've used all your included usage for this period")).reason, 'quota_exhausted', '"used all your included usage" -> quota_exhausted');
+  A.eq(R(httpErr(429, 'free usage exhausted')).reason, 'quota_exhausted', '"usage exhausted" -> quota_exhausted');
+  // the per-minute veto still holds: a short-window limit stays a plain, retryable rate limit
+  const perMinute = R(httpErr(429, 'usage exhausted for requests per minute, retry in 10s'));
+  A.eq(perMinute.reason, 'rate_limit', 'a PER-MINUTE "usage exhausted" is still rate_limit');
+  A.eq(perMinute.retryable, true, 'and still retryable');
+  // SHORT_WINDOW_RE held literal 0x08 bytes where \b was meant, so the rpm/tpm veto could never match
+  A.eq(R(httpErr(429, 'usage exhausted (tpm)')).reason, 'rate_limit', 'a 429 "usage exhausted (tpm)" is per-minute -> rate_limit');
+  A.eq(R(httpErr(429, 'usage limit reached: 60 rpm')).retryable, true, 'a 429 usage limit in rpm stays retryable');
+  A.eq(R(httpErr(429, 'usage limit reached')).reason, 'quota_exhausted', 'without a short-window word it is still quota_exhausted');
+
+  // xAI API-key team out of credits / at its spending cap: 429, flat body, BILLING (no wait fixes a wallet)
+  const wallet = R(Object.assign(new Error('openai-compatible http 429 - [code Some resource has been exhausted] Your team t-1 has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit.'),
+    { status: 429, providerCode: 'Some resource has been exhausted' }));
+  A.eq(wallet.reason, 'billing', 'xAI "used all available credits … spending limit" 429 -> billing');
+  A.eq(wallet.retryable, false, 'billing is not retryable');
+  A.eq(R(httpErr(402, 'spending limit reached for this subscription')).reason, 'billing', '402 spending limit -> billing');
+  A.eq(R(httpErr(402, 'monthly spending limit reached; resets at 2026-10-01')).reason, 'billing',
+    'a Payment Required spending cap stays billing even when it names a reset date');
+  A.eq(R(httpErr(402, 'rate limit resets at midnight')).reason, 'rate_limit', 'the 402 rate-window read is unchanged (word reset)');
+  // …including a NUMERIC reset: the full quota regex's "resets at <digit>" must not flip a 402 rate window terminal
+  A.eq(R(httpErr(402, 'rate limit exceeded, resets at 1767225600')).reason, 'rate_limit', '402 "resets at <epoch>" stays rate_limit');
+  A.eq(R(httpErr(402, 'Resets at 12:00 UTC')).retryable, true, '402 "Resets at 12:00 UTC" stays retryable');
+  A.eq(R(httpErr(402, "You've used all the included free usage for model grok-4.7")).reason, 'quota_exhausted', 'a 402 xAI allowance body is quota_exhausted');
+  A.eq(R(Object.assign(httpErr(402, 'request rejected'), { providerCode: 'subscription:free-usage-exhausted' })).reason, 'quota_exhausted', 'a 402 with the xAI allowance code is quota_exhausted');
+  A.eq(R(new Error('Your team has used all available credits')).reason, 'billing', 'status-less credits text -> billing');
+
+  // 426 Upgrade Required: the CLI proxy refused the client version. Non-retryable, and NOT auth (no reconnect).
+  const upgrade = R(Object.assign(new Error('Grok (xAI) http 426 - client version is no longer supported, please upgrade'), { status: 426 }));
+  A.eq(upgrade.reason, 'format_error', '426 -> format_error (the request itself is refused)');
+  A.eq(upgrade.retryable, false, '426 is not retryable — the same client version fails the same way');
+  A.eq(upgrade.shouldRotateCredential, false, '426 does not blame the credential');
+  A.eq(R(httpErr(426)).reason, 'format_error', 'a bare 426 status is format_error too');
+}
+
 A.report('errorclass.test');

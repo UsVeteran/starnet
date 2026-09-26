@@ -481,6 +481,7 @@ test/modelpicker.test.js
 test/model-provider-reconcile.test.js
 test/model-catalog-truth.test.js
 test/agent-model-select.test.js
+test/hero-model-drift.test.js
 test/model-reasoning-presets.test.js
 test/provider-connections-ui.test.js
 test/newhero-reset.test.js
@@ -627,6 +628,7 @@ test/prop-starter-shelf.test.js
 test/waitanchor.test.js
 test/harness.integration.test.js
 test/toolsearch.test.js
+test/wire-plan.test.js
 test/consent.interactive.test.js
 test/consentwait.test.js
 test/consent-visibility.test.js

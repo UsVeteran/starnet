@@ -64,7 +64,7 @@ const docExtract = require('./tools/builtin/docextract.js').makeDocExtract({ inf
 const imageWire = require('./tools/builtin/imagewire.js').makeImageWire({});
 const { makeNotebookTools, reviseRecord } = require('./tools/builtin/notebook.js');
 const { makeRecallTool } = require('./tools/builtin/recall.js');
-const { makeToolSearchTool } = require('./tools/builtin/toolsearch.js');   // tool.search: reach a granted-but-unadvertised (deferred) tool
+const { makeToolSearchTool, MAX_HITS: TOOL_SEARCH_MAX_HITS } = require('./tools/builtin/toolsearch.js');   // tool.search: reach a granted-but-unadvertised (deferred) tool
 const CodeMode = require('./tools/builtin/code.js');                      // code.run: bounded JS composition over this run's read-only grants
 const { makeCodeTools } = CodeMode;
 const { makeSkillTools } = require('./tools/builtin/skills.js');    // H4: the agent's reusable skill library tools
@@ -98,6 +98,7 @@ const { resolveTools } = require('./capability/resolve.js');
 const { CAP_REGISTRY } = require('./capability/registry.js');
 const { toolsetRows, toggleableCaps } = require('./capability/toolsets.js');   // TOOLSETS console: capId families derived from CAP_REGISTRY
 const { makeCapCtx } = require('./capability/capGate.js');
+const { planWireTools, wireToolLimit, describeDeferred } = require('./capability/wire-plan.js');   // provider wire-tool cap + connector deferral: one split for wire, tool.search and prompt
 const { composeOffice, stationWithObject, stationWithConnectors } = require('./capability/office.js');   // THE MOAT: interactive office = compute freebie + placed caps
 const { summarizeCapabilities } = require('./capability/capsummary.js');   // truthful "what you can/can't do" so the agent stops over-promising
 const { starnetManual } = require('./manual.js');   // truthful "how StarNet works" so the agent can guide a stuck Commander (interactive only)
@@ -293,7 +294,7 @@ const { makeTerminalSessions } = require('./terminal-sessions.js');
 const { makeTerminalTools } = require('./tools/builtin/terminal.js');
 const { makeProcLedger } = require('./procledger.js');              // persistent child-PID ledger — boot sweep reaps force-kill orphans
 const { makeInputGuard } = require('./inputguard.js');              // stuck cursor-confinement (ClipCursor) release — 2026-07-12 incident
-const { enforceSyntheticOnly, enforceRunAuthority, enforceEnabledToolsets, makeRunAuthority, runInputContext, impactOfTool, normalizeUnattendedGrants, backgroundOwnsLocalUrl, makeLoopbackListenerProbe } = require('./inputpolicy.js'); // per-run user-control authority + synthetic CDP policy
+const { enforceSyntheticOnly, enforceRunAuthority, enforceEnabledToolsets, makeRunAuthority, runInputContext, impactOfTool, normalizeUnattendedGrants, backgroundOwnsLocalUrl, makeLoopbackListenerProbe, isConnectorTool } = require('./inputpolicy.js'); // per-run user-control authority + synthetic CDP policy
 const { makeEnvironmentManager, sanitizeChildEnv } = require('./environment.js');     // execution backend boundary (reference-harness-style)
 const { makeExecutionRouter } = require('./execution-router.js');                     // per-agent profile -> real backend routing
 const executionProfiles = require('./execution-profiles.js');       // per-agent runtime/scope envelope; approval + desktop lease stay separate
@@ -3664,8 +3665,9 @@ function oauthDeviceConfig(id, deviceId) {
   }
   return null;
 }
-// Extra inference headers for a device-OAuth provider (kimi's X-Msh-* set; grok needs none). The registry
-// profile carries the STATIC kimi headers; these add the runtime OS version + device id, merged by the factory.
+// Extra inference headers for a device-OAuth provider (kimi's X-Msh-* set). The registry profile carries the
+// STATIC headers (kimi's X-Msh-*, grok's Grok-CLI identity + its env-overridable client version); these add
+// only runtime values (kimi's OS version + device id), merged over the profile's by the factory.
 function oauthInferenceHeaders(id) {
   const entry = oauthProviders[id];
   if (id === 'kimi' && entry) return kimiMshHeaders(entry.deviceId);
@@ -15257,6 +15259,7 @@ async function runOnce(o) {
   }
   return runOnceCore(o);
 }
+const wirePlanWarned = new Set();   // one wire-cap spill warning per (provider, cap, spilled-count) per process
 async function runOnceCore(o) {
   if (updatePreparation.isFrozen()) {
     throw Object.assign(new Error('StarNet is frozen at a verified pre-update recovery point.'), { code: 'UPDATE_MUTATIONS_FROZEN' });
@@ -16384,7 +16387,9 @@ async function runOnceCore(o) {
     try { codexToken = await ensureCodexAccessToken(); }
     catch (e) {
       emit('agent.run.start', { agentId, runId, trigger: trigger, model });
-      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: 'ChatGPT sign-in needed: ' + ((e && e.message) || e) });
+      // Only a relogin-class failure is a sign-in problem; a quota/network refresh failure keeps its own words
+      // (a "sign-in needed" prefix sent it to a pointless ⏼ RECONNECT door in COMMS).
+      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: (e && e.reloginRequired ? 'ChatGPT sign-in needed: ' : 'ChatGPT: ') + ((e && e.message) || e) });
       emit('agent.run.end', { agentId, runId, reason: 'error', turns: 0, usd: 0 });
       return;
     }
@@ -16397,7 +16402,7 @@ async function runOnceCore(o) {
     try { oauthToken = await ensureOAuthAccessToken(providerId); }
     catch (e) {
       emit('agent.run.start', { agentId, runId, trigger: trigger, model });
-      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: oauthLabel(providerId) + ' sign-in needed: ' + ((e && e.message) || e) });
+      emit('agent.run.error', { agentId, runId, transient: !(e && e.reloginRequired), message: oauthLabel(providerId) + (e && e.reloginRequired ? ' sign-in needed: ' : ': ') + ((e && e.message) || e) });
       emit('agent.run.end', { agentId, runId, reason: 'error', turns: 0, usd: 0 });
       return;
     }
@@ -16593,8 +16598,35 @@ async function runOnceCore(o) {
   // one of those, and the A/B control for measuring whether deferral (rather than the model) caused a miss.
   const deferralOff = String((process.env && process.env.SKYNET_TOOL_SEARCH) || '').trim() === '0';
   const directDomainWithheld = (name) => !!directDomainTask && (/^team\./.test(name) || /^browser\./.test(name) || name === 'web_search' || name === 'web_request');
-  const deferredNames = new Set((deferralOff ? [] : (resolved.deferred || [])).filter(n => !directDomainWithheld(n)));
-  const coreNames = resolved.tools.filter(n => !deferredNames.has(n) && !directDomainWithheld(n));
+  /* PROVIDER WIRE CAP + CONNECTOR DEFERRAL (capability/wire-plan.js). xAI 400s a request carrying >350 tools, and
+     a provider fallback reuses THIS list mid-run, so the cap is the smallest profile maxTools across the whole
+     chain; reveals keep 2 searches of headroom under it. A primary profile's deferConnectorTools (SuperGrok:
+     quota-metered, and ~380 connector schemas per turn burned the included usage) holds granted connector tools
+     behind tool.search. Task turns only — a chat turn sends no tools — and a provider with neither gets the
+     identical split. The cap may come from a FALLBACK profile, so the warning and the notes name the profile
+     that set it (wireCapOwner), never just the primary. */
+  const wireLimit = isTask ? wireToolLimit([primaryProfile].concat(providerFallbacks.map(fb => getProviderProfile(fb.providerId)))) : { cap: 0, providerId: '' };
+  const wireCap = wireLimit.cap;
+  const wireCapOwner = wireLimit.providerId || providerId;
+  const wirePlan = planWireTools({
+    tools: resolved.tools, deferred: resolved.deferred, deferralOff, withheld: directDomainWithheld,
+    maxTools: wireCap, reserve: 2 * TOOL_SEARCH_MAX_HITS, pinned: internalBriefTools,
+    isConnector: name => isConnectorTool(registry.get(name)),
+    deferConnectors: isTask && !!(primaryProfile && primaryProfile.deferConnectorTools)
+  });
+  // capCtx captured resolved.deferred when it was built; tool.search searches capCtx.deferred. Re-point both so
+  // what the loop holds back, what the search can find and what the prompt names are one list.
+  resolved.deferred = capCtx.deferred = wirePlan.deferred;
+  if (wirePlan.spilled.length) {
+    const warnKey = wireCapOwner + '|' + wireCap + '|' + wirePlan.spilled.length;
+    if (!wirePlanWarned.has(warnKey)) {
+      wirePlanWarned.add(warnKey);
+      console.warn('[tools] ' + wireCapOwner + ' wire cap ' + wireCap + ': ' + wirePlan.spilled.length + ' tools spilled off the wire'
+        + (wirePlan.unreachable.length ? ' (' + wirePlan.unreachable.length + ' unreachable: tool.search not granted)' : ' (tool.search can reveal them)'));
+    }
+  }
+  const deferredNames = new Set(wirePlan.deferred);
+  const coreNames = wirePlan.core;
   const toolDefs = isTask ? registry.wireFormat(registry.list(new Set(coreNames))) : [];
   const deferredToolDefs = isTask ? registry.wireFormat(registry.list(deferredNames)) : [];
   const fromWire = new Map();
@@ -17040,6 +17072,10 @@ async function runOnceCore(o) {
     + (hasBrowserTools ? 'For public browser changes, use browser_navigate plus browser_console/browser_snapshot/browser_vision. ' : '')
     + (hasBrowserTestTools ? 'For LOCAL browser, UI, canvas, or game verification, start the dev server with shell_exec background:true, confirm its bg id/port with shell_bg_status, then MUST use browser_test_navigate(serverId) + browser_test_snapshot/browser_test_state/browser_test_input. They run headless CDP and emulate pointer/keyboard lock without touching physical devices. NEVER launch Chrome, Edge, Firefox, Puppeteer, Playwright, Selenium, or a browser smoke through shell_exec/verify_run for an input-capturing app; those paths are refused. ' : '')
     + ((hasShellExec || hasWriteTools || hasBrowserTools) ? 'Final reports must name changed files, verification commands/results, and any running server URL/background id or remaining limitation. ' : '');
+  const deferredPromptList = describeDeferred(deferredToolDefs.map(d => d.function.name), (wire) => {
+    const cap = String((registry.get(fromWire.get(wire) || wire) || {}).capability || '');
+    return cap.indexOf('mcp:') === 0 ? cap.slice(4) : null;
+  });
   const toolNote = (isTask && wireNames.length)
     ? '\n\n[HARNESS] You are running in a REAL agent harness on the Commander\'s machine, at a workstation with '
       + 'these LIVE tools: ' + wireNames.join(', ') + '. '
@@ -17058,12 +17094,18 @@ async function runOnceCore(o) {
          answer it never measured. A count asks the model to first imagine a capability might exist and then
          go looking; a name list removes that step entirely, which is the actual barrier. ~400 B of names
          against the ~8.5KB of schemas they stand in for, and it rides the CACHED prefix. */
+      /* Past ~40 deferred connector tools, each server collapses to "mcp__<id>__* (N tools)" (wire-plan.js):
+         every name listed is still one tool.search can reveal, just not ~380 of them re-sent every turn. */
       + (deferredToolDefs.length
         ? 'This list is PARTIAL. You have ' + deferredToolDefs.length + ' more granted tools that are not loaded yet. '
-          + 'These exist and you CAN use them: ' + deferredToolDefs.map(d => d.function.name).join(', ') + '. '
+          + 'These exist and you CAN use them: ' + deferredPromptList.list.join(', ') + '. '
+          + (deferredPromptList.collapsed ? 'An mcp__<server>__* entry stands for that connector\'s tools; search with the server name and the action you need. ' : '')
           + 'To use one, call tool_search with the capability you want ("take a screenshot", "read network responses") '
           + 'and it becomes callable immediately. You MUST do that before saying you cannot do something, and you must '
           + 'never report an action as done when you had no tool to perform it. '
+        : '')
+      + (wirePlan.unreachable.length
+        ? wirePlan.unreachable.length + ' further granted tools exceed the ' + wireCapOwner + ' provider\'s per-request tool limit (' + wireCap + ') and cannot be used this run. '
         : '')
       + taskDoctrineNote
       + (wireNames.indexOf('routine_create') >= 0
@@ -17545,6 +17587,9 @@ async function runOnceCore(o) {
       acceptanceProbe,
       // Granted but unadvertised: held out of the request until tool.search reveals one (see loop.js).
       deferredTools: o.outputOnly ? [] : deferredToolDefs,
+      // The provider chain's wire-tool ceiling (0 = none): tool.search reveals may fill the reserve, never pass it.
+      maxWireTools: o.outputOnly ? 0 : wireCap,
+      maxWireToolsProvider: wireCapOwner,
       hiddenTools: o.outputOnly ? [] : ['brief_ask', 'brief_proceed', 'brief_update'],
       // A turn that asks for four file reads waited four round trips for them; an all-read-only batch now
       // overlaps. The predicate is above — the loop cannot judge tool scope on its own.
@@ -19830,8 +19875,20 @@ async function listModelsForProvider(providerId, opts) {
   } else {
     provider = selectProvider({ provider: id, fetch: globalThis.fetch, key, baseUrl });
   }
-  const models = await provider.listModels();
-  return models.filter(item => ImageTask.isAgentModel(id, item && item.id));
+  const models = (await provider.listModels()).filter(item => ImageTask.isAgentModel(id, item && item.id));
+  // Reasoning truth for the dock: a row that provably reasons (supportsReasoning:true — grok's static grok-4) but
+  // declares no efforts was served OFF-only, and the dock pinned 'none' onto a reasoning model. Where the profile
+  // documents `reasoning_effort` on the wire, fill such a row from the adapter's own per-model list — exactly what
+  // its stream() may send. Rows of UNKNOWN capability (gpt-4o-mini, llama, deepseek-chat on keyed profiles) stay
+  // OFF-only as before: offering MIN..HIGH there sends an effort those models reject. Profiles without the wire
+  // param (kimi, codex, custom…) and ones asserting their models can't reason (Ollama) are served unchanged.
+  if (!profile || profile.wireReasoningEffort !== true || profile.supportsReasoning === false || typeof provider.reasoningEfforts !== 'function') return models;
+  return models.map(m => {
+    if (!m || m.supportsReasoning !== true || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)) return m;
+    let efforts = null;
+    try { efforts = provider.reasoningEfforts(m.id); } catch (_) { efforts = null; }
+    return (Array.isArray(efforts) && efforts.length) ? Object.assign({}, m, { reasoningEfforts: efforts.slice() }) : m;
+  });
 }
 
 async function handleProviderModels(req, res) {

@@ -405,12 +405,14 @@ const ModelDock = (() => {
     return clampEffortForModel(currentEffort(), item || currentModelItem());
   }
 
+  // DISPLAY-ONLY clamp. Writing the clamp back into Harness on every reflect let one OFF-only catalog render
+  // (grok's live rows before they carried efforts) persist 'none' over the saved effort. Only explicit choices
+  // (applyModel / applyEffort) write, so the SAVED effort is what runs send. The request-path guard is the
+  // sidecar's: non-reasoning rows are served OFF-only, the openai-compatible adapter never sends reasoning_effort
+  // to a row declared non-reasoning, and it drops + retries when an endpoint rejects it (Ollama's non-thinking
+  // models, xAI's reasoningEffort) — it does NOT map the saved effort onto what this chip shows.
   function ensureCurrentEffort() {
-    const item = currentModelItem();
-    const raw = currentEffort();
-    const effort = clampEffortForModel(raw, item);
-    if (effort !== raw && typeof Harness !== 'undefined' && Harness.setReasoningEffort) Harness.setReasoningEffort(effort);
-    return effort;
+    return clampEffortForModel(currentEffort(), currentModelItem());
   }
 
   async function fetchProviderModels(p, force) {
@@ -730,7 +732,7 @@ const ModelDock = (() => {
     if (!tip) return;
     const current = getModel();
     const p = provider();
-    const effort = currentEffort();
+    const effort = effectiveEffort();   // the same clamped tier the chip shows
     const def = effortDef(effort);
     const model = current ? modelLabel({ id: current }) : 'no model selected';
     tip.innerHTML =

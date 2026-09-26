@@ -192,6 +192,25 @@ const iso = cron._internals.iso;
   A.eq(j.repeat.completed, 1, 'permanent error consumes the occurrence');
 }
 
+// ---- 11b. a SPENT provider allowance settles like a permanent error, never the 90s transient backoff ----
+// cron-driver takes `transient` from agent.run.error, which the loop sets from the classifier's `retryable`.
+// A SuperGrok free-usage 429 used to classify as rate_limit (retryable), so the routine re-fired every 90s
+// against a meter no wait refills; quota_exhausted is non-retryable, so the occurrence finalizes.
+{
+  const { classifyApiError } = require('../sidecar/providers/errorClass.js');
+  const cls = classifyApiError(Object.assign(new Error("Grok (xAI) http 429 - You've used all the included free usage for model grok-4.7"),
+    { status: 429, providerCode: 'subscription:free-usage-exhausted' }));
+  let jobs = store.createJob([], { id: 'qx', schedule: cron.parseSchedule('every 1h', T0) }, { now: T0 });
+  const failAt = T0 + HOUR;
+  jobs = store.markRun(jobs, 'qx', { status: 'error', error: cls.message, transient: cls.retryable }, { now: failAt, backoffMs: 90000 });
+  const j = store.getJob(jobs, 'qx');
+  A.eq(cls.reason, 'quota_exhausted', 'the spent allowance classifies as quota_exhausted');
+  A.eq(j.retryCount || 0, 0, 'no transient retry was counted');
+  A.ok(j.nextRunAt !== iso(failAt + 90000), 'no 90s backoff re-fire was armed');
+  A.eq(j.nextRunAt, iso(failAt + HOUR), 'the routine re-arms one period out, like any permanent error');
+  A.eq(j.repeat.completed, 1, 'the occurrence is consumed');
+}
+
 // ---- 12. finite-repeat interval exhaustion: completes after `times` runs ----
 {
   let jobs = store.createJob([], { id: 'fin', schedule: cron.parseSchedule('every 1h', T0), repeat: { times: 2 } }, { now: T0 });

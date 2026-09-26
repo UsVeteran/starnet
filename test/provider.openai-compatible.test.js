@@ -298,6 +298,141 @@ module.exports = (async () => {
     A.eq(JSON.parse(posts()[2].init.body).stream_options, undefined, 'remembered drop keeps the param off the wire');
   }
 
+  // REASONING-EFFORT REQUEST GUARD. The model dock's effort clamp is display-only, so a saved 'high' reaches the
+  // adapter even for a model the dock shows as OFF (a specialist loadout on an Ollama hero). Through the REAL
+  // registry profiles: a rejection that never spells `reasoning_effort` still drops it and retries, and a row the
+  // catalog declares non-reasoning never carries it at all.
+  {
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    const okStream = () => new Response('data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    const rig = (reject, models) => {
+      const posts = [];
+      const fetch = async (url, init) => {
+        if (!init || init.method !== 'POST') return models ? new Response(JSON.stringify({ data: models }), { status: 200 }) : new Response('forbidden', { status: 403 });
+        const body = JSON.parse(init.body);
+        posts.push(body);
+        return (body.reasoning_effort !== undefined && reject(body)) || okStream();
+      };
+      return { posts, fetch };
+    };
+    const texts = evs => evs.filter(e => e.type === 'text').map(e => e.delta).join('');
+
+    // Ollama: the exact 400 a live Ollama 0.32 returns for a non-thinking model sent reasoning_effort
+    const ol = rig(b => b.model === 'llama3.1:8b' && new Response(JSON.stringify({ error: { message: '"llama3.1:8b" does not support thinking', type: 'invalid_request_error' } }), { status: 400 }),
+      [{ id: 'llama3.1:8b', object: 'model' }, { id: 'qwen3:14b', object: 'model' }]);
+    const ollama = selectProvider({ provider: 'ollama', fetch: ol.fetch });
+    A.eq(texts(await collect(ollama, { model: 'llama3.1:8b', messages: [], reasoningEffort: 'high' })), 'hi', 'an Ollama non-thinking model given HIGH still answers (no hard 400)');
+    A.eq(ol.posts.map(b => b.reasoning_effort), ['high', undefined], '"does not support thinking" drops reasoning_effort and retries once');
+    await collect(ollama, { model: 'llama3.1:8b', messages: [], reasoningEffort: 'high' });
+    A.eq(ol.posts.length, 3, 'the drop is remembered for that model');
+    A.eq(ol.posts[2].reasoning_effort, undefined, 'a remembered drop keeps reasoning_effort off the wire');
+    await collect(ollama, { model: 'qwen3:14b', messages: [], reasoningEffort: 'high' });
+    A.eq(ol.posts[3].reasoning_effort, 'high', 'a thinking Ollama model still receives the effort');
+
+    // xAI names the param camelCase
+    const xa = rig(b => new Response(JSON.stringify({ code: 'Client specified an invalid argument', error: 'Model ' + b.model + ' does not support parameter reasoningEffort.' }), { status: 400 }));
+    await collect(selectProvider({ provider: 'xai', fetch: xa.fetch, key: 'fixture-only' }), { model: 'grok-3', messages: [], reasoningEffort: 'low' });
+    A.eq(xa.posts.map(b => b.reasoning_effort), ['low', undefined], 'an xAI `reasoningEffort` rejection drops reasoning_effort and retries');
+
+    // rows the registry declares non-reasoning: no reasoning_effort on the wire, and no effort dial advertised
+    const never = () => new Response(JSON.stringify({ error: { message: 'reasoning_effort sent to a non-reasoning row' } }), { status: 400 });
+    for (const [provider, plain, thinking, auth] of [['perplexity', 'sonar', 'sonar-reasoning-pro', { key: 'fixture-only' }], ['grok', 'grok-3', 'grok-4.7', { token: 'fixture-only' }]]) {
+      const r = rig(never);
+      const p = selectProvider(Object.assign({ provider, fetch: r.fetch }, auth));
+      await p.listModels();   // /models fails → the registry's static roster (explicit supportsReasoning per row)
+      await collect(p, { model: plain, messages: [], reasoningEffort: 'high' });
+      A.eq(r.posts.map(b => b.reasoning_effort), [undefined], provider + ' ' + plain + ' (supportsReasoning:false) never sends reasoning_effort');
+      A.eq(p.reasoningEfforts(plain), ['none'], provider + ' ' + plain + ' advertises only reasoning off');
+      await collect(p, { model: thinking, messages: [], reasoningEffort: 'high' });
+      A.eq(r.posts[1].reasoning_effort, 'high', provider + ' ' + thinking + ' (reasoning row) still sends the effort');
+      A.ok(p.reasoningEfforts(thinking).indexOf('high') >= 0, provider + ' ' + thinking + ' keeps its effort dial');
+    }
+  }
+
+  // XAI GROK-CLI CATALOG SHAPE. The exact row a live GET cli-chat-proxy.grok.com/v1/models returned (2026-09-25):
+  // context_window (no context_length), supports_reasoning_effort, and reasoning_efforts as {id,value,label,default}
+  // objects. The row must come out honest, and the wire must only ever carry a level the row declares.
+  {
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    const { _internals } = require('../sidecar/providers/openai-compatible.js');
+    const LIVE = {"object":"list","data":[{"id":"grok-4.7","object":"model","owned_by":"xAI","model":"grok-4.7","model_family":"xai","name":"Grok 4.7","description":"...","context_window":500000,"auto_compact_threshold_percent":80,"system_prompt_label":"Grok 4.7","api_backend":"responses","reasoning_effort":"high","supports_reasoning_effort":true,"reasoning_efforts":[{"id":"xhigh","value":"xhigh","label":"Extra High","default":false},{"id":"high","value":"high","label":"High","default":true},{"id":"medium","value":"medium","label":"Medium","default":false},{"id":"low","value":"low","label":"Low","default":false}],"supports_backend_search":true}]};
+    const DECLARED = ['low', 'medium', 'high', 'xhigh'];
+    const posts = [];
+    const fetch = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify(LIVE), { status: 200 });
+      posts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const grok = selectProvider({ provider: 'grok', fetch, token: 'fixture-only' });
+    const [row] = await grok.listModels();
+    A.eq(row.id, 'grok-4.7', 'the live grok catalog row is read');
+    A.eq(row.fallback, undefined, 'a live row is not marked fallback');
+    A.eq(row.context_length, 500000, 'context_window becomes the context length when context_length is absent');
+    A.eq(grok.contextLimit('grok-4.7'), 500000, 'contextLimit() reports the declared 500k window');
+    A.eq(row.supportsReasoning, true, 'supports_reasoning_effort:true makes the row a reasoning row');
+    A.eq(row.reasoningEfforts, DECLARED, 'reasoning_efforts[].value become the declared efforts, ordered low -> high');
+    A.eq(row.reasoningEfforts.indexOf('none'), -1, 'no OFF is invented for a declared list that has none (codex/openrouter convention)');
+    A.eq(grok.reasoningEfforts('grok-4.7'), DECLARED, 'reasoningEfforts(id) exposes exactly the declared levels');
+    const sent = async effort => {
+      posts.length = 0;
+      await collect(grok, { model: 'grok-4.7', messages: [], reasoningEffort: effort });
+      return posts[0].reasoning_effort;
+    };
+    A.eq(await sent('low'), 'low', 'the grok profile default LOW is declared and sent as-is');
+    A.eq(await sent('high'), 'high', 'a declared level is sent unchanged');
+    A.eq(await sent('xhigh'), 'xhigh', 'xhigh rides the wire for a model that declares it');
+    A.eq(await sent('max'), 'xhigh', 'max maps to the declared ceiling xhigh');
+    A.eq(await sent('minimal'), 'low', 'minimal is never sent to a model that lacks it - nearest declared (low)');
+    A.eq(await sent('none'), 'low', 'OFF on an always-reasoning row sends its lowest declared level, not the server default (high)');
+    // the profile default (index.js resolveReasoningEffort -> the instance default) is the grok profile's declared 'low'
+    const factory = require('../sidecar/providers/factory.js');
+    A.eq(factory.defaultReasoningEffortForProvider('grok'), 'low', 'grok profile default effort stays low');
+    const byDefault = selectProvider({ provider: 'grok', fetch, token: 'fixture-only', reasoningEffort: factory.defaultReasoningEffortForProvider('grok') });
+    await byDefault.listModels();
+    posts.length = 0;
+    await collect(byDefault, { model: 'grok-4.7', messages: [] });
+    A.eq(posts[0].reasoning_effort, 'low', 'the grok profile default reaches the wire unchanged');
+
+    // other rows keep the pre-existing clamp byte-for-byte: no declaration -> xhigh clamps to high, minimal passes
+    const plainPosts = [];
+    const plainFetch = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [{ id: 'grok-4.3', context_length: 131072 }, { id: 'camel', reasoningEfforts: ['low', 'high', 'xhigh'] }] }), { status: 200 });
+      plainPosts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const xai = selectProvider({ provider: 'xai', fetch: plainFetch, key: 'fixture-only' });
+    const rows = await xai.listModels();
+    A.eq(rows[0].context_length, 131072, 'context_length still wins where it is present');
+    A.eq([rows[0].supportsReasoning, rows[0].reasoningEfforts, rows[0].catalogEfforts], [null, [], undefined], 'an undeclared row normalizes exactly as before');
+    A.eq(rows[1].reasoningEfforts, ['low', 'high', 'xhigh'], 'a camelCase declared list is kept verbatim');
+    for (const [model, effort, want] of [['grok-4.3', 'xhigh', 'high'], ['grok-4.3', 'max', 'high'], ['grok-4.3', 'minimal', 'minimal'], ['grok-4.3', 'medium', 'medium'], ['camel', 'xhigh', 'high'], ['camel', 'medium', 'medium']]) {
+      plainPosts.length = 0;
+      await collect(xai, { model, messages: [], reasoningEffort: effort });
+      A.eq(plainPosts[0].reasoning_effort, want, model + ' ' + effort + ' keeps the legacy wire clamp (' + want + ')');
+    }
+    A.eq(xai.reasoningEfforts('grok-4.3'), ['none', 'minimal', 'low', 'medium', 'high'], 'an undeclared row keeps the wire-scale dial');
+
+    // the clamp itself: undeclared lists are the legacy scale; declared lists map to the nearest declared level
+    const w = _internals.wireEffort;
+    A.eq([w('xhigh'), w('max'), w('min'), w('bogus'), w('none')], ['high', 'high', 'minimal', 'medium', ''], 'no declaration: legacy clamp unchanged');
+    A.eq([w('xhigh', ['low', 'high']), w('medium', ['low', 'high']), w('minimal', ['high']), w('high', ['none'])], ['high', 'low', 'high', 'high'], 'declared: nearest declared level, never above the request when a lower one exists');
+    A.eq([w('none', ['low', 'high']), w('off', ['medium', 'xhigh']), w('none', ['none', 'low']), w('', ['low'])], ['low', 'medium', '', ''], 'declared without OFF: none sends the lowest level; a declared none (or no effort) still omits');
+    A.eq(_internals.normalizeModel({ id: 'x', reasoning_efforts: ['XHIGH', { id: 'low' }, 'bogus', 'low'] }).reasoningEfforts, ['low', 'xhigh'], 'reasoning_efforts accepts string or {id} entries, drops unknown levels, dedupes');
+
+    // offline: the static roster's grok-4.7 mirrors the live row (500k, declared low..xhigh, same wire clamp)
+    const offPosts = [];
+    const offline = selectProvider({ provider: 'grok', token: 'fixture-only', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response('forbidden', { status: 403 });
+      offPosts.push(JSON.parse(init.body));
+      return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    } });
+    const seed = (await offline.listModels()).find(m => m.id === 'grok-4.7');
+    A.eq([seed.fallback, seed.context_length, seed.supportsReasoning, seed.reasoningEfforts], [true, 500000, true, DECLARED], 'the grok-4.7 seed row mirrors the live catalog row');
+    await collect(offline, { model: 'grok-4.7', messages: [], reasoningEffort: 'xhigh' });
+    await collect(offline, { model: 'grok-4.7', messages: [], reasoningEffort: 'minimal' });
+    A.eq(offPosts.map(b => b.reasoning_effort), ['xhigh', 'low'], 'the seed row holds the wire to its declared levels too');
+  }
+
   // tools are NEVER silently dropped - a provider that rejects tools must fail the run honestly
   {
     const calls = [];
@@ -344,6 +479,28 @@ module.exports = (async () => {
     const pLive = makeOpenAICompatibleProvider({ fetch: liveFetch, baseUrl: 'http://api/v1', staticModels: statics });
     const fromLive = await pLive.listModels();
     A.eq(fromLive.map(m => m.id).join(','), 'real-model', 'a live catalog always wins over the static roster');
+    A.eq(fromStatic[0].fallback, undefined, 'an authoritative static roster (Perplexity) is a real catalog, not an offline seed');
+
+    // staticModelsFallback (grok/kimi OAuth): the roster only seeds a FAILED live /models, so substituted rows carry
+    // the fallback marker — the probe and the model dock must never read them as a confirmed catalog.
+    const failFetch = async () => new Response('forbidden', { status: 403 });
+    for (const [label, fetch] of [['empty', emptyFetch], ['failed', failFetch]]) {
+      const pSeed = makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://api/v1', staticModels: statics, staticModelsFallback: true });
+      const seeded = await pSeed.listModels();
+      A.eq(seeded.map(m => [m.id, m.fallback]), [['sonar', true]], label + ' live catalog serves the seed roster marked fallback');
+      A.eq(pSeed.contextLimit('sonar'), 128000, label + ' fallback rows still carry context limits');
+    }
+    const pSeedLive = makeOpenAICompatibleProvider({ fetch: liveFetch, baseUrl: 'http://api/v1', staticModels: statics, staticModelsFallback: true });
+    A.eq((await pSeedLive.listModels()).map(m => [m.id, m.fallback]), [['real-model', undefined]], 'live rows never carry the fallback marker');
+
+    // the registry wiring: grok/kimi seed rosters are fallbacks, Perplexity's roster is authoritative
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    for (const [id, expected] of [['grok', true], ['kimi', true], ['perplexity', undefined]]) {
+      const p = selectProvider({ provider: id, fetch: failFetch, key: 'fixture-only', token: 'fixture-only' });
+      const rows = await p.listModels();
+      A.ok(rows.length > 0, id + ' serves its static roster when /models fails');
+      A.ok(rows.every(m => m.fallback === expected), id + ' static rows fallback=' + expected);
+    }
   }
 
   /* ---- a FAILED boot probe must not become a permanent cache hit ----
@@ -456,6 +613,88 @@ module.exports = (async () => {
     A.ok(receipt.text.includes('upstream-correlation-456'), 'upstream id survives diagnostic truncation');
     A.ok(receipt.text.includes('local-run-789'), 'local run remains correlated to this error');
     A.ok(!receipt.text.includes('PRIVATE PROMPT'), 'raw upstream payload is not copied');
+  }
+
+  /* ---- FLAT xAI error bodies: {code, error:"<sentence>"} ----
+     A spent SuperGrok allowance answered 429 with a flat body. Reading only error.{message,code} left providerCode
+     '' and the raw JSON as the message, so the classifier saw a plain 429 (rate_limit) and the adapter retried a
+     meter no wait refills. Now: ONE request, a non-transient error, the code structured, the sentence human. */
+  {
+    let posts = 0;
+    const fetchImpl = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      posts++;
+      return new Response(JSON.stringify({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage for model grok-4.7. Enable Extra Usage to continue." }), { status: 429 });
+    };
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, key: 'k', baseUrl: 'https://cli-chat-proxy.example.test/v1', label: 'Grok (xAI)' });
+    let err = null;
+    try { await collect(p, { model: 'grok-4.7', messages: [{ role: 'user', content: 'hi' }] }); }
+    catch (e) { err = e; }
+    A.ok(err, 'the spent allowance fails the run');
+    A.eq(posts, 1, 'exactly ONE request — a spent allowance is never retried with backoff');
+    A.eq(err.transient, false, 'the error is marked non-transient');
+    A.ok(!err.preStreamRetriesExhausted, 'and was not treated as an exhausted transient ladder');
+    A.eq(err.providerCode, 'subscription:free-usage-exhausted', 'the flat top-level code is lifted into providerCode');
+    A.ok(/^Grok \(xAI\) http 429 - \[code subscription:free-usage-exhausted\] You've used all the included free usage/.test(err.message),
+      'the message is the human sentence (with its code), labeled with the provider: ' + err.message);
+    A.ok(!/[{}"]/.test(err.message), 'no raw JSON reaches the user');
+    // a flat {message, code} body reads the same way
+    const p2 = makeOpenAICompatibleProvider({ baseUrl: 'https://flat.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(JSON.stringify({ code: 'invalid_argument', message: 'Maximum tools limit reached' }), { status: 400 });
+    } });
+    let err2 = null;
+    try { await collect(p2, { model: 'm', messages: [] }); } catch (e) { err2 = e; }
+    A.eq(err2 && err2.providerCode, 'invalid_argument', 'flat {message, code}: code lifted');
+    A.ok(/\[code invalid_argument\] Maximum tools limit reached$/.test(err2 && err2.message), 'flat {message, code}: message is the sentence');
+    // an object-shaped body without a code gains no invented one
+    const p3 = makeOpenAICompatibleProvider({ baseUrl: 'https://obj.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(JSON.stringify({ code: 'top_level_ignored', error: { message: 'nested wins' } }), { status: 400 });
+    } });
+    let err3 = null;
+    try { await collect(p3, { model: 'm', messages: [] }); } catch (e) { err3 = e; }
+    A.eq(err3 && err3.providerCode, '', 'object-shaped error bodies keep reading error.code only');
+    A.ok(/http 400 - nested wins$/.test(err3 && err3.message), 'object-shaped error bodies keep their exact message');
+    // a string `error` that is only a CODE TOKEN must not hide the sentence beside it (base showed the sentence
+    // for {error, message} and the raw JSON — description included — for OAuth-style {error, error_description})
+    const { responseErrorDetail } = require('../sidecar/providers/openai-compatible.js')._internals;
+    const bodyRes = (obj, status) => new Response(JSON.stringify(obj), { status: status || 401 });
+    const tokMsg = await responseErrorDetail(bodyRes({ error: 'unauthorized', message: 'Your device link expired — re-link this station.' }));
+    A.eq(tokMsg.detail, 'Your device link expired — re-link this station.', 'flat {error:<code>, message:<sentence>}: the top-level message wins over the code token');
+    const tokDesc = await responseErrorDetail(bodyRes({ error: 'invalid_token', error_description: 'The access token expired' }));
+    A.eq(tokDesc.detail, 'invalid_token: The access token expired', 'flat {error, error_description}: the description rides with the token');
+    const xaiFlat = await responseErrorDetail(bodyRes({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage" }, 429));
+    A.eq(xaiFlat.detail, "[code subscription:free-usage-exhausted] You've used all the included free usage", "xAI's {code, error:<sentence>} (no message) still reads the sentence");
+  }
+  // an in-stream flat error keeps its sentence (and code) instead of collapsing to 'provider stream error'
+  {
+    const fetchImpl = async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(line({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage" }) + '\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    };
+    const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://stream.example.test/v1' });
+    let err = null;
+    try { await collect(p, { model: 'm', messages: [] }); } catch (e) { err = e; }
+    A.eq(err && err.message, "openai-compatible stream error: You've used all the included free usage", 'the in-stream string error keeps its text, labeled');
+    A.eq(err && err.providerCode, 'subscription:free-usage-exhausted', 'and its code');
+    // labeled like the pre-stream error, so the UI can see a GROK OAUTH in-stream failure came from grok
+    const pg = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://stream.example.test/v1', label: 'Grok (xAI)' });
+    let errG = null;
+    try { await collect(pg, { model: 'm', messages: [] }); } catch (e) { errG = e; }
+    A.ok(/^Grok \(xAI\) stream error: You've used all the included free usage$/.test(errG && errG.message), 'a labeled adapter names itself on an in-stream error: ' + (errG && errG.message));
+    const { friendlyError } = require('../frontend/app/friendlyerror.js');
+    const fv = friendlyError(errG);
+    A.eq(fv.kind, 'quota_exhausted', 'the labeled grok in-stream spent allowance reads as quota_exhausted in the UI');
+    A.eq(fv.provider, 'grok', 'and carries the grok copy');
+    // in-stream {error:<code>, message:<sentence>}: the sentence wins, as it does pre-stream
+    const pm = makeOpenAICompatibleProvider({ baseUrl: 'https://stream.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(line({ error: 'overloaded', message: 'The model is at capacity right now' }) + '\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    } });
+    let errM = null;
+    try { await collect(pm, { model: 'm', messages: [] }); } catch (e) { errM = e; }
+    A.eq(errM && errM.message, 'openai-compatible stream error: The model is at capacity right now', 'in-stream flat {error, message}: the sentence wins');
   }
 
   // OUTPUT CEILING (issue #17): off by default, on when the profile declares it, explicit req.max_tokens wins,
