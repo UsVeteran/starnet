@@ -303,6 +303,61 @@ for (const raw of [
     'the browser fallback and the shared sidecar table give the SAME verdict');
 }
 
+/* ---- GROK OAUTH (SuperGrok) meter + client-version failures: grok's own fix, never a sign-in door ----
+   xAI's quota body can itself say "not available" / "sign in", and the grok_oauth_unavailable + grok oauth
+   heuristics ran BEFORE any status read — so a spent subscription allowance offered USE XAI (API KEY) or
+   RECONNECT GROK, and a spending-limit 402 said "top it up". Both ladders (node delegate + the browser vm, which is
+   what users run) must give the same answer. */
+{
+  const vm = require('vm');
+  const fs3 = require('fs');
+  const path3 = require('path');
+  const src = fs3.readFileSync(path3.join(__dirname, '..', 'frontend', 'app', 'friendlyerror.js'), 'utf8');
+  const sandbox = { console };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(src + '\nthis.__F = Friendly;', sandbox, { filename: 'friendlyerror.js' });
+  const B = sandbox.__F;
+  const QUOTA_RAW = "Grok (xAI) http 429 - [code subscription:free-usage-exhausted] You've used all the included free usage for model grok-4.7. Extra usage is not available until you sign in at grok.com and enable it.";
+  for (const [label, F] of [['NODE', friendlyError], ['BROWSER', B.friendlyError]]) {
+    const q = F(new Error(QUOTA_RAW));
+    A.eq(q.kind, 'quota_exhausted', label + ': grok free-usage 429 is quota_exhausted even though the body says "not available" and "sign in"');
+    A.ok(q.kind !== 'oauth' && q.kind !== 'grok_oauth_unavailable', label + ': never the sign-in or xAI-key door');
+    A.eq(q.retryable, false, label + ': no doomed Try again');
+    A.eq(q.action, 'settings', label + ': the door is SETTINGS → PROVIDERS');
+    A.eq(q.provider, 'grok', label + ': the verdict names grok');
+    A.ok(/Grok subscription's included usage is used up/.test(q.userMessage), label + ': the copy names the spent Grok allowance');
+    A.ok(/Extra Usage/.test(q.userMessage) && /Auto Top Up/.test(q.userMessage) && /grok\.com/.test(q.userMessage), label + ': and the grok.com fix');
+    A.ok(/PROVIDERS/.test(q.userMessage), label + ': and the switch-provider escape');
+    const btn = actionButton(q);
+    A.ok(btn && !/RECONNECT|XAI|Try again/i.test(btn.label), label + ': the button is neither RECONNECT, USE XAI nor a retry: ' + (btn && btn.label));
+
+    const pay = F(new Error('Grok (xAI) http 402 - Payment required: spending limit reached'));
+    A.eq(pay.kind, 'billing', label + ': grok 402 -> billing');
+    A.eq(pay.retryable, false, label + ': grok 402 is not retryable');
+    A.ok(/Extra Usage/.test(pay.userMessage) && !/top it up/i.test(pay.userMessage), label + ': grok 402 gets the Extra Usage fix, not "top it up"');
+    A.eq(F(new Error('Grok (xAI) http 402 - not available for this account')).kind, 'billing', label + ': a grok 402 saying "not available" is billing, not the xAI-key door');
+
+    const old = F(new Error('Grok (xAI) http 426 - client version not allowed, please upgrade'));
+    A.eq(old.retryable, false, label + ': grok 426 is not retryable');
+    A.ok(old.kind !== 'oauth' && old.kind !== 'grok_oauth_unavailable', label + ': grok 426 is not a sign-in problem');
+    A.ok(/client version/i.test(old.userMessage) && /STARNET_GROK_CLIENT_VERSION/.test(old.userMessage), label + ': grok 426 names the client version and the env override');
+    A.eq(old.action, 'settings', label + ': grok 426 still offers the PROVIDERS door');
+
+    // the XAI API-key provider (unlabeled adapter) is pay-per-token credit: "top it up" stays right there, even
+    // when the body names a grok model id
+    const xai = F(new Error('openai-compatible http 429 - Your team t-1 has either used all available credits or reached its monthly spending limit for grok-4.'));
+    A.eq(xai.kind, 'billing', label + ': xAI API-key credits 429 -> billing');
+    A.ok(/top it up/i.test(xai.userMessage) && !/Extra Usage/.test(xai.userMessage), label + ': and keeps the generic top-up copy');
+
+    // the token path (index.js): a NON-relogin refresh failure no longer claims "sign-in needed"
+    const refresh = F(new Error('GROK OAUTH: Provider quota exhausted (429). Credentials are still valid; retry after the limit resets.'));
+    A.ok(refresh.kind !== 'oauth', label + ': a rate-limited token refresh is not a RECONNECT GROK case');
+    A.eq(F(new Error('GROK OAUTH sign-in needed: Not signed in to GROK OAUTH — connect it first.')).kind, 'oauth', label + ': a relogin-class failure still is');
+    A.eq(F(new Error('Grok (xAI) http 403 - oauth not enabled for this account')).kind, 'grok_oauth_unavailable', label + ': the allowlist 403 keeps its xAI-key door');
+  }
+}
+
 /* ---- PROVIDER 5xx/OVERLOAD => name the PROVIDER's servers, never the local service (2026-07-30) ----
    The report wave behind this: users seeing "servers are unavailable out of the blue" during industry-wide
    provider load spikes, because every provider 500/529/"overloaded" landed on the server_error copy that says
