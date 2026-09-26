@@ -6,7 +6,7 @@
    either findable by tool.search or honestly reported unreachable — never silently advertised. */
 'use strict';
 const A = require('./_assert.js');
-const { planWireTools, wireToolCap, describeDeferred } = require('../sidecar/capability/wire-plan.js');
+const { planWireTools, wireToolCap, wireToolLimit, describeDeferred } = require('../sidecar/capability/wire-plan.js');
 const { MAX_HITS } = require('../sidecar/tools/builtin/toolsearch.js');
 const factory = require('../sidecar/providers/factory.js');
 
@@ -144,6 +144,9 @@ function legacy(tools, deferred, deferralOff, withheld) {
   const g = factory.getProviderProfile('grok'), o = factory.getProviderProfile('openrouter');
   A.eq(wireToolCap([o, g]), 340, 'openrouter primary + grok fallback caps at the xAI budget');
   A.eq(wireToolCap([o]), 0, 'openrouter alone is uncapped');
+  A.eq(wireToolLimit([o, g]), { cap: 340, providerId: 'grok' }, 'the limit names the FALLBACK that set it, not the uncapped primary');
+  A.eq(wireToolLimit([{ id: 'a', maxTools: 340 }, { id: 'b', maxTools: 128 }]), { cap: 128, providerId: 'b' }, 'the smallest cap names its own profile');
+  A.eq(wireToolLimit([o]), { cap: 0, providerId: '' }, 'no cap, no owner');
 }
 
 // ---- 9. describeDeferred: collapse connector servers past the threshold, built-ins stay explicit ----

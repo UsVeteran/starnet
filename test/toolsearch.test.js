@@ -227,9 +227,11 @@ const DEFERRED = ['page.screenshot', 'page.upload'];
 
   // ---- F. a provider wire ceiling bounds reveals, and the search result never claims what was not added ----
   {
-    const runWith = async (maxWireTools) => {
+    const runWith = async (maxWireTools, maxWireToolsProvider) => {
       const registry = fixture();
       const seen = [];
+      const bus = A.makeBus();
+      const toolResults = A.collectBus(bus, ['agent.tool_result']);
       const provider = {
         priceOf, contextLimit: () => 0,
         stream: async function* (req) {
@@ -247,13 +249,13 @@ const DEFERRED = ['page.screenshot', 'page.upload'];
       const fromWire = new Map();
       for (const d of core.concat(deferredDefs)) { const real = d.function.name; const w = real.replace(/\./g, '_'); fromWire.set(w, real); d.function.name = w; }
       const res = await runAgentLoop({
-        messages: [{ role: 'user', content: 'screenshot then upload' }], provider, emit: makeEmitter(A.makeBus(), () => {}),
-        cost: makeCostEngine({ priceOf }), tools: core, deferredTools: deferredDefs, maxWireTools,
+        messages: [{ role: 'user', content: 'screenshot then upload' }], provider, emit: makeEmitter(bus, () => {}),
+        cost: makeCostEngine({ priceOf }), tools: core, deferredTools: deferredDefs, maxWireTools, maxWireToolsProvider,
         dispatch: (c, ctx) => registry.dispatch(fromWire.has(c.name) ? Object.assign({}, c, { name: fromWire.get(c.name) }) : c, ctx),
         capCtx: makeCapCtx({ agentId: 'a', room: 'r', hasCompute: true, tools: ['page.open', 'tool.search'].concat(DEFERRED), deferred: DEFERRED.slice(), approvalRules: {} }, { timeoutMs: 5000 }),
         model: 'm', agentId: 'a', runId: 'r'
       });
-      return { res, seen, core };
+      return { res, seen, core, toolResults };
     };
 
     const open = await runWith(undefined);
@@ -266,7 +268,21 @@ const DEFERRED = ['page.screenshot', 'page.upload'];
     const result = capped.seen[1].messages.find(m => m.role === 'tool');
     A.ok(/NOT loaded/.test(result.content) && result.content.indexOf('page.upload') >= 0, 'the search result tells the model which match was NOT loaded');
     A.ok(/limit \(3\)/.test(result.content), 'and why');
+    A.ok(/^Now available/.test(result.content) && /· page\.screenshot/.test(result.content) && !/· page\.upload/.test(result.content),
+      'the "Now available" list keeps the loaded match and drops the one that did not fit');
+    A.eq(capped.toolResults.map(e => e.payload.summary), ['1 revealed, 1 over the tool limit'],
+      'the agent.tool_result event carries the corrected reveal count, not the raw search count');
     A.eq(capped.core.length, 2, 'the caller\'s tools array is untouched by reveals');
+
+    // No room at all: nothing is loaded, so nothing may be described as available.
+    const full = await runWith(2, 'xai');
+    A.eq(full.seen[1].tools, ['page_open', 'tool_search'], 'a wire already at the ceiling reveals nothing');
+    const fullResult = full.seen[1].messages.find(m => m.role === 'tool');
+    A.ok(!/Now available/.test(fullResult.content) && /^Matching tools were found but NOT loaded/.test(fullResult.content),
+      'with nothing loaded the result drops the "Now available" header');
+    A.ok(fullResult.content.indexOf('page.screenshot') >= 0 && fullResult.content.indexOf('page.upload') >= 0, 'and still names every match it could not load');
+    A.ok(/the xai provider's per-request tool limit \(2\)/.test(fullResult.content), 'naming the provider whose limit it is (it may be a fallback)');
+    A.eq(full.toolResults.map(e => e.payload.summary), ['0 revealed, 2 over the tool limit'], 'and the event says nothing was revealed');
 
     const zero = await runWith(0);
     A.eq(zero.seen[1].tools, open.seen[1].tools, 'maxWireTools 0 is no ceiling (byte-identical to omitting it)');

@@ -59,6 +59,7 @@ async function run(o) {
   const res = await runAgentLoop({
     messages, provider, emit, cost: makeCostEngine({ priceOf: provider.priceOf }),
     model: 'replay/model', agentId: 'a', runId: 'r', tools: o.tools || toolDefs('fs_write', 'verify_run', 'shell_exec'),
+    deferredTools: o.deferredTools,
     limits: Object.assign({ maxIters: 8, grace: false }, o.limits || {}),
     dispatch: (c, ctx) => r.dispatch(c, ctx), capCtx: openCtx()
   });
@@ -275,6 +276,42 @@ async function run(o) {
       'source grounding does not spend an impossible turn when the connector exposes no reader');
     A.eq((await run({ user: 'Summarize the available connector capabilities.', fixture: fixture(inspect, {}), tools: toolDefs(inspect, fetch), registry: externalReg() })).sourceNudges.length, 0,
       'an inspect-only task that asks for no source grounding does not spend an extra turn');
+  }
+
+  // ---- 11. DEFERRED READ-BACK: a provider with deferConnectorTools (grok) holds every connector behind
+  //           tool.search, so the read-back tool is granted but not advertised when the run stops. It still
+  //           arms both nudges while tool_search can reach it, and the nudge says to load it first. ----
+  {
+    const action = 'mcp__parity_fixture_eval__fixture_action';
+    const verify = 'mcp__parity_fixture_eval__fixture_verify_file';
+    const withSearch = externalReg();
+    // Stands in for tool.search: reveals the action only, exactly as a search for the write would.
+    withSearch.register({ name: 'tool_search', schema: { type: 'object', properties: {} }, run: async () => ({ content: 'Now available to call for the rest of this run:\n· ' + action, summary: '1 revealed', control: { revealTools: [action] } }) });
+    const revealThenAct = { turns: [
+      [{ type: 'tool_start', index: 0, id: 'c0', name: 'tool_search' }, { type: 'tool_args', index: 0, chunk: '{"query":"fixture action"}' }, { type: 'done', finishReason: 'tool_calls' }],
+      [{ type: 'tool_start', index: 0, id: 'c1', name: action }, { type: 'tool_args', index: 0, chunk: '{"action":"restart_service"}' }, { type: 'done', finishReason: 'tool_calls' }],
+      [{ type: 'text', delta: 'All set.' }, { type: 'done', finishReason: 'stop' }],
+      [{ type: 'text', delta: 'All set.' }, { type: 'done', finishReason: 'stop' }]
+    ] };
+    const deferredReadBack = await run({ fixture: revealThenAct, tools: toolDefs('tool_search'), deferredTools: toolDefs(action, verify), registry: withSearch });
+    A.eq(deferredReadBack.externalNudges.length, 1, 'a connector write whose read-back tool is still deferred still buys the read-back nudge');
+    A.ok(/load it with tool_search first/.test(deferredReadBack.externalNudges[0].content), 'and the nudge says to load the deferred read-back tool first');
+
+    const advertised = await run({ fixture: fixture(action, { action: 'restart_service' }), tools: toolDefs(action, verify), registry: externalReg() });
+    A.ok(advertised.externalNudges.length === 1 && !/tool_search/.test(advertised.externalNudges[0].content),
+      'an advertised read-back tool needs no load step, so the nudge does not mention tool_search');
+
+    A.eq((await run({ fixture: fixture(action, { action: 'restart_service' }), tools: toolDefs(action), deferredTools: toolDefs(verify), registry: externalReg() })).externalNudges.length, 0,
+      'a deferred read-back tool with no tool_search advertised is unreachable, so no impossible turn is spent');
+
+    const inspect = 'mcp__parity_fixture_eval__fixture_inspect';
+    const fetch = 'mcp__parity_fixture_eval__fixture_fetch';
+    const deferredReader = await run({
+      user: 'Cite the source.', fixture: fixture(inspect, {}, 2),
+      tools: toolDefs(inspect, 'tool_search'), deferredTools: toolDefs(fetch), registry: externalReg()
+    });
+    A.eq(deferredReader.sourceNudges.length, 1, 'a deferred connector fetch tool still arms source grounding');
+    A.ok(/load it with tool_search first/.test(deferredReader.sourceNudges[0].content), 'and names the tool_search step');
   }
 
   A.report('loop.verify-on-stop.test');

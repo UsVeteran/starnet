@@ -23,7 +23,7 @@ Dev entry: `node dev/seed.js --keep` — materializes a pre-onboarded scratch wo
 | Agent loop | `loop.js` (~460) | `runAgentLoop()` — messages-array while-loop; tool-call accumulation + arg repair; stateless between runs |
 | Server | `index.js` (~6.5k) | HTTP+SSE, `/api/run` and every other route, static frontend, event emission. THE hotfile — most merges conflict here |
 | Providers | `providers/` | `factory.js` + anthropic, openrouter, openai-compatible, gemini, codex (ChatGPT OAuth + token store) |
-| Capability | `capability/` | station layout → tool allowlist: `resolve.js`, `capGate.js`, `registry.js` (CAP_REGISTRY), `toolsets.js`, `office.js` |
+| Capability | `capability/` | station layout → tool allowlist: `resolve.js`, `capGate.js`, `registry.js` (CAP_REGISTRY), `toolsets.js`, `office.js`, `wire-plan.js` (per-provider wire-tool cap + connector deferral) |
 | Tools | `tools/` (14) | registry + web/browser/computer/desktop/fs/notebook/recall/skills/image/spotify/shell… Tool surface must never exceed wired reality |
 | Channels | `channels/` (8) | telegram transport+adapter, discord gateway+wire, SSE hub, `secrets.js` (keychain split), store, registry |
 | MCP | `mcp/` (5) | manager, http/stdio transports, OAuth 2.1 generic client, curated one-click catalog |

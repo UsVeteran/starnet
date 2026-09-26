@@ -92,6 +92,10 @@
       maxTools: 340,   // wire-tool budget: xAI rejects a request carrying >350 tools ("Maximum tools limit reached")
       // SuperGrok is quota-metered: ~380 connector schemas re-sent every turn burned the included usage. Granted
       // connector tools wait behind tool.search, which reveals them on demand (capability/wire-plan.js).
+      // PRIMARY ONLY: read from the run's primary profile (index.js runOnceCore). When grok is only a FALLBACK
+      // of an uncapped, non-deferring primary, fallback turns still carry connector schemas — up to the chain's
+      // maxTools cap, which is what keeps them legal — because the wire list is built once per run and deferring
+      // it for the primary's sake would tax every primary turn with a tool_search step.
       deferConnectorTools: true,
       baseUrl: 'https://cli-chat-proxy.grok.com/v1',
       // Required by cli-chat-proxy — without these, chat returns 426 or spending-limit errors. The ONLY copy:

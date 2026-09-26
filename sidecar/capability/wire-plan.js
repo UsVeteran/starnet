@@ -13,6 +13,8 @@
        isConnector  name -> bool (MCP connector tool)
        deferConnectors  the provider asked for connector schemas to wait behind tool.search
    wireToolCap(profiles) -> the smallest positive maxTools across a run's provider chain; 0 when none caps.
+   wireToolLimit(profiles) -> { cap, providerId }: the same ceiling plus the id of the profile that set it (a
+       fallback's limit must not be reported as the primary's); providerId is '' when nothing caps.
    describeDeferred(...) -> the prompt's deferred-name list, connector servers collapsed (see below).
 
    THREE STEPS, each a no-op unless asked for, so an uncapped provider without deferConnectors gets exactly the
@@ -80,14 +82,15 @@
     return { core, deferred, spilled, unreachable };
   }
 
-  function wireToolCap(profiles) {
-    let cap = 0;
+  function wireToolLimit(profiles) {
+    let cap = 0, providerId = '';
     for (const p of (Array.isArray(profiles) ? profiles : [])) {
       const n = posInt(p && p.maxTools);
-      if (n && (!cap || n < cap)) cap = n;
+      if (n && (!cap || n < cap)) { cap = n; providerId = String((p && p.id) || ''); }
     }
-    return cap;
+    return { cap, providerId };
   }
+  const wireToolCap = profiles => wireToolLimit(profiles).cap;
 
   /* The prompt's deferred-name list. Names beat a bare count (weaker models never searched for a counted-only
      tool), but a few hundred connector names is kilobytes of prompt every turn — so past `threshold` connector
@@ -109,5 +112,5 @@
     return { list: out, collapsed: groups.size };
   }
 
-  return { planWireTools, wireToolCap, describeDeferred };
+  return { planWireTools, wireToolCap, wireToolLimit, describeDeferred };
 });

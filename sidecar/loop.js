@@ -3,7 +3,7 @@
    clock / signal. Every observable transition is a validated U.bus event (via the injected emit).
 
    runAgentLoop({ messages, provider, emit, tools, limits, signal, clock, cost, dispatch, capCtx,
-                  agentId, runId, model, trigger, deferredTools?, maxWireTools? }) -> { reason, messages, usd, turns }
+                  agentId, runId, model, trigger, deferredTools?, maxWireTools?, maxWireToolsProvider? }) -> { reason, messages, usd, turns }
 
    Invariants:
      - GUARDS run before any paid call (cancelled / max_iters / budget).
@@ -255,6 +255,7 @@
         return { c, r, ms: Math.max(0, (meta.clock ? meta.clock.now() : 0) - t0) };
       }));
       for (const s of settled) {
+        if (meta.fitResult) s.r = meta.fitResult(s.r);   // in call order, so a batch's reveal room is spent deterministically
         results.push({ callId: s.c.id, isError: !!s.r.isError, ok: !!s.r.ok, content: s.r.content, summary: s.r.summary || (s.r.isError ? 'error' : 'ok'), control: s.r.control || null, images: s.r.images || null, parkedPath: s.r.parkedPath || null });
         if (meta.hiddenTools && meta.hiddenTools.has(s.c.name)) continue;
         emit('agent.tool_result', {
@@ -297,6 +298,7 @@
         r = { ok: false, isError: true, content: 'tool dispatch threw: ' + (e && e.message), summary: 'error' };
       }
       r = r || { ok: false, isError: true, content: 'tool returned nothing', summary: 'error' };
+      if (meta.fitResult) r = meta.fitResult(r);   // provider wire ceiling: correct a reveal BEFORE it is recorded or emitted
       const t1 = meta.clock ? meta.clock.now() : 0;
       results.push({ callId: c.id, isError: !!r.isError, ok: !!r.ok, content: r.content, summary: r.summary || (r.isError ? 'error' : 'ok'), control: r.control || null, images: r.images || null, parkedPath: r.parkedPath || null });
       if (r.control && r.control.final) finalControl = r.control;
@@ -505,15 +507,21 @@
     /* PROVIDER WIRE CEILING (o.maxWireTools; 0/absent = none, byte-identical to before). xAI 400s a request
        carrying >350 tools; the host planned the advertised list under this (capability/wire-plan.js), and a
        reveal may fill the remaining room but never pass it. What does not fit stays deferred, and the search
-       result is corrected so it never claims a tool that was not added. */
+       result is corrected so it never claims a tool that was not added. o.maxWireToolsProvider names the
+       profile that set the ceiling (it may be a fallback, not the primary). */
     const maxWireTools = (typeof o.maxWireTools === 'number' && isFinite(o.maxWireTools) && o.maxWireTools > 0)
       ? Math.floor(o.maxWireTools) : 0;
-    function fitReveals(results) {
+    const wireLimitLabel = (o.maxWireToolsProvider ? 'the ' + String(o.maxWireToolsProvider) + ' provider\'s' : 'this provider\'s')
+      + ' per-request tool limit (' + maxWireTools + ')';
+    /* One fitter per tool batch, applied by executeCalls to each result BEFORE it is recorded or emitted, so the
+       transcript, the result summary and the agent.tool_result event all carry the true reveal set. Room is
+       counted from the wire as it stands when the batch starts; reveals land after the batch. */
+    function makeRevealFitter() {
       let room = maxWireTools - tools.length;
       const taken = new Set();
-      for (const r of results) {
+      return function fitReveal(r) {
         const reveal = r && r.control && r.control.revealTools;
-        if (!Array.isArray(reveal)) continue;
+        if (!Array.isArray(reveal)) return r;
         const kept = [], dropped = [];
         for (const name of reveal) {
           const key = wireKey(name);
@@ -521,11 +529,19 @@
           if (!deferredDefs.has(key) || taken.has(key)) { kept.push(name); continue; }
           if (room > 0) { room--; taken.add(key); kept.push(name); } else dropped.push(name);
         }
-        if (!dropped.length) continue;
-        r.control = Object.assign({}, r.control, { revealTools: kept });
-        r.content = String(r.content == null ? '' : r.content) + '\n\nNOT loaded — this provider\'s per-request tool limit ('
-          + maxWireTools + ') is reached, so these cannot be called this run: ' + dropped.join(', ') + '.';
-      }
+        if (!dropped.length) return r;
+        // Strip each dropped tool's own "· <name> …" line (tool.search's hit format) so nothing left in the
+        // result still reads as callable; with nothing kept, the "Now available" header goes too.
+        const gone = new Set(dropped);
+        const lines = String(r.content == null ? '' : r.content).split('\n')
+          .filter(l => { const m = /^· (\S+)/.exec(l); return !(m && gone.has(m[1])); });
+        const note = 'NOT loaded — ' + wireLimitLabel + ' is reached, so these cannot be called this run: ' + dropped.join(', ') + '.';
+        return Object.assign({}, r, {
+          content: kept.length ? lines.join('\n') + '\n\n' + note : 'Matching tools were found but ' + note,
+          summary: kept.length + ' revealed, ' + dropped.length + ' over the tool limit',
+          control: Object.assign({}, r.control, { revealTools: kept })
+        });
+      };
     }
     const limits = o.limits || {};
     // Missing/zero means the Commander did not opt into a turn ceiling. Operational
@@ -1437,45 +1453,67 @@
         // state now exists. When that same connector exposes a plausible observation/read-back tool, spend one
         // bounded turn asking the model to use it. Tool names and server annotations are untrusted, so this can
         // only cause a conservative nudge; it never clears consent, changes scope, or marks evidence as valid.
+        // The read-back tool may be granted but still DEFERRED (a provider with deferConnectorTools holds every
+        // connector behind tool.search — capability/wire-plan.js). It counts while tool_search is advertised to
+        // reach it, and the nudge then says to load it first; without tool_search it is unreachable, and asking
+        // for it would burn a turn on an impossible call.
+        const vosSearchable = tools.some(t => wireKey(t && t.function && t.function.name) === 'tool_search');
+        const vosCandidates = tools.map(t => ({ t, loaded: true }))
+          .concat(vosSearchable ? Array.from(deferredDefs.values(), t => ({ t, loaded: false })) : []);
         const externalObservers = new Map();
-        for (const tool of tools) {
-          const effect = vosExternalEffect(tool && tool.function && tool.function.name);
+        for (const { t, loaded } of vosCandidates) {
+          const effect = vosExternalEffect(t && t.function && t.function.name);
           if (!effect || effect.role !== 'observe') continue;
-          const prior = externalObservers.get(effect.connector) || { any: false, strong: false };
+          const prior = externalObservers.get(effect.connector) || { any: false, strong: false, anyLoaded: false, strongLoaded: false };
           prior.any = true; prior.strong = prior.strong || effect.strong;
+          if (loaded) { prior.anyLoaded = true; prior.strongLoaded = prior.strongLoaded || effect.strong; }
           externalObservers.set(effect.connector, prior);
         }
         const externalTouched = [];
-        let externalArtifactTouched = false;
+        let externalArtifactTouched = false, externalNeedsSearch = false;
         for (const [connector, pending] of vosExternalUnverified) {
           const observers = externalObservers.get(connector);
           if (!observers || !observers.any) continue;
           for (const name of pending.names) {
-            if (pending.artifacts.has(name) && !observers.strong) continue;
+            const artifact = pending.artifacts.has(name);
+            if (artifact && !observers.strong) continue;
             externalTouched.push(name);
-            if (pending.artifacts.has(name)) externalArtifactTouched = true;
+            if (artifact) externalArtifactTouched = true;
+            if (!(artifact ? observers.strongLoaded : observers.anyLoaded)) externalNeedsSearch = true;
           }
         }
         if (!empty && !graceUsed && vosExternalUsed < VOS_MAX && externalTouched.length) {
           vosExternalUsed++;
           const touched = externalTouched.slice(0, 8).join(', ');
           const artifactRule = externalArtifactTouched ? ' This action changed a file, document, workbook, or other artifact; a generic status/read call does not prove that artifact is fresh. Use the connector\'s dedicated verify/check/confirm tool.' : ' Use the connector\'s narrowest read/check/verify tool now.';
-          messages.push({ role: 'system', content: '<verify_external_before_done>You used an external connector action in this run (' + touched + ') and are ending without a later read-back or verification call. A successful action response is not independent proof that the requested state persisted.' + artifactRule + ' Then report only what that result proves. If no meaningful read-back can verify this action, say plainly that the external state was NOT independently verified instead of claiming it was.</verify_external_before_done>' });
+          const loadRule = externalNeedsSearch ? ' That tool is granted but not loaded yet: load it with tool_search first (the connector name plus the read/verify action you need), then call it.' : '';
+          messages.push({ role: 'system', content: '<verify_external_before_done>You used an external connector action in this run (' + touched + ') and are ending without a later read-back or verification call. A successful action response is not independent proof that the requested state persisted.' + artifactRule + loadRule + ' Then report only what that result proves. If no meaningful read-back can verify this action, say plainly that the external state was NOT independently verified instead of claiming it was.</verify_external_before_done>' });
           continue;
         }
         // SOURCE VERIFY-ON-STOP: search/list/inspect output discovers candidates; it does not prove the
         // contents of a source the model cites. When the user explicitly asked for sourced work and that same
         // connector exposes a real fetch/read tool, spend one bounded turn requiring retrieval. This never
-        // trusts result prose, widens tool authority, or demands an impossible call.
-        const sourceReaders = new Set(tools.map(t => vosExternalEffect(t && t.function && t.function.name))
-          .filter(effect => effect && VOS_EXTERNAL_SOURCE_READ_RE.test(effect.leaf)).map(effect => effect.connector));
+        // trusts result prose, widens tool authority, or demands an impossible call. A deferred reader counts
+        // exactly as a deferred observer does above.
+        const sourceReaders = new Map();   // connector -> a reader is already advertised
+        for (const { t, loaded } of vosCandidates) {
+          const effect = vosExternalEffect(t && t.function && t.function.name);
+          if (!effect || !VOS_EXTERNAL_SOURCE_READ_RE.test(effect.leaf)) continue;
+          sourceReaders.set(effect.connector, sourceReaders.get(effect.connector) || loaded);
+        }
         const unfetchedSources = [];
+        let sourceNeedsSearch = false;
         if (sourceGroundingTask) {
-          for (const [connector, names] of vosSourcesUnfetched) if (sourceReaders.has(connector)) unfetchedSources.push(...names);
+          for (const [connector, names] of vosSourcesUnfetched) {
+            if (!sourceReaders.has(connector)) continue;
+            unfetchedSources.push(...names);
+            if (!sourceReaders.get(connector)) sourceNeedsSearch = true;
+          }
         }
         if (!empty && !graceUsed && vosSourceUsed < VOS_MAX && unfetchedSources.length) {
           vosSourceUsed++;
-          messages.push({ role: 'system', content: '<verify_sources_before_done>You are ending a sourced/research task after using only a connector search, list, or inspect tool. Discovery metadata and snippets are not source retrieval. Use the connector\'s fetch/read tool to retrieve every source you cite, then make each claim only from what those source reads actually returned. If a source cannot be retrieved, label that claim unverified instead of citing the discovery result as proof.</verify_sources_before_done>' });
+          const loadRule = sourceNeedsSearch ? ' That fetch/read tool is granted but not loaded yet: load it with tool_search first (the connector name plus "fetch" or "read").' : '';
+          messages.push({ role: 'system', content: '<verify_sources_before_done>You are ending a sourced/research task after using only a connector search, list, or inspect tool. Discovery metadata and snippets are not source retrieval. Use the connector\'s fetch/read tool to retrieve every source you cite, then make each claim only from what those source reads actually returned.' + loadRule + ' If a source cannot be retrieved, label that claim unverified instead of citing the discovery result as proof.</verify_sources_before_done>' });
           continue;
         }
         if (!empty && !graceUsed && acceptanceProbe && accUsed < ACC_MAX) {
@@ -1515,13 +1553,12 @@
       }
       let results;
       try {
-        results = await executeCalls(calls, dispatch, capCtx, emit, { agentId, runId, clock, signal, hiddenTools: new Set(o.hiddenTools || []), parallelSafe: (typeof o.parallelSafe === 'function') ? o.parallelSafe : null, turnOutputMax: TURN_OUTPUT_MAX });
+        results = await executeCalls(calls, dispatch, capCtx, emit, { agentId, runId, clock, signal, hiddenTools: new Set(o.hiddenTools || []), parallelSafe: (typeof o.parallelSafe === 'function') ? o.parallelSafe : null, turnOutputMax: TURN_OUTPUT_MAX, fitResult: maxWireTools ? makeRevealFitter() : null });
         assertPaired(calls, results); // (7) HARD INVARIANT
       } catch (e) {
         emit('agent.run.error', { agentId, runId, message: String((e && e.message) || e), transient: false });
         return end('error', { failureStage: 'tool_boundary', failureCode: (e && e.fatalToRun) ? 'durability_boundary' : 'tool_dispatch_failure' });
       } finally { bookToolCosts(); }
-      if (maxWireTools) fitReveals(results);   // before the results reach the transcript, so the correction does too
       for (const r of results) messages.push(toolResultMsg(r.callId, r.isError, r.content));
       for (const call of calls) {
         const receipt = results.find(r => r.callId === call.id);
@@ -1625,7 +1662,7 @@
         const reveal = r.control && r.control.revealTools;
         if (!Array.isArray(reveal)) continue;
         for (const name of reveal) {
-          if (maxWireTools && tools.length >= maxWireTools) break;   // fitReveals already trimmed; the ceiling holds regardless
+          if (maxWireTools && tools.length >= maxWireTools) break;   // the reveal fitter already trimmed; the ceiling holds regardless
           const key = wireKey(name);
           const def = deferredDefs.get(key);
           if (!def) continue;

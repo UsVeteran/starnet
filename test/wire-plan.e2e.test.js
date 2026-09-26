@@ -159,7 +159,13 @@ async function drive(fixture, body) {
     A.ok(xai.results.some(r => r.callId === 'call_1' && r.ok === true), 'xai: the spilled-then-revealed tool call succeeded');
     A.ok(/result of extra_/.test(String(x[2].toolMsgs[1] && x[2].toolMsgs[1].content)), 'xai: the model read the real MCP result back');
     A.eq(xai.end && xai.end.reason, 'done', 'xai: the run completed');
-    A.ok((fixture.output().match(/\[tools\] xai wire cap 340/g) || []).length === 1, 'xai: the spill is logged once');
+    const spillLogs = () => (fixture.output().match(/\[tools\] xai wire cap 340/g) || []).length;
+    A.eq(spillLogs(), 1, 'xai: the spill is logged once');
+
+    // The plan is rebuilt every run, so only the per-process dedupe can keep a second identical spill quiet.
+    const xaiAgain = await drive(fixture, { provider: 'xai', key: 'xai-wireplan-fake-key', baseUrl: llm.base, model: 'grok-4.7', agentId: 'xai-agent', isTask: true, messages: [{ role: 'user', content: 'XAIFLOW use the last extra tool' }] });
+    A.eq(xaiAgain.end && xaiAgain.end.reason, 'done', 'xai: a second run with the same connector set completes');
+    A.eq(spillLogs(), 1, 'xai: the second identical spill is not logged again (once per process, not per run)');
   } finally {
     await fixture.dispose();
     mcp.server.close(); llm.server.close();

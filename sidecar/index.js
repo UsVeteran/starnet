@@ -98,7 +98,7 @@ const { resolveTools } = require('./capability/resolve.js');
 const { CAP_REGISTRY } = require('./capability/registry.js');
 const { toolsetRows, toggleableCaps } = require('./capability/toolsets.js');   // TOOLSETS console: capId families derived from CAP_REGISTRY
 const { makeCapCtx } = require('./capability/capGate.js');
-const { planWireTools, wireToolCap, describeDeferred } = require('./capability/wire-plan.js');   // provider wire-tool cap + connector deferral: one split for wire, tool.search and prompt
+const { planWireTools, wireToolLimit, describeDeferred } = require('./capability/wire-plan.js');   // provider wire-tool cap + connector deferral: one split for wire, tool.search and prompt
 const { composeOffice, stationWithObject, stationWithConnectors } = require('./capability/office.js');   // THE MOAT: interactive office = compute freebie + placed caps
 const { summarizeCapabilities } = require('./capability/capsummary.js');   // truthful "what you can/can't do" so the agent stops over-promising
 const { starnetManual } = require('./manual.js');   // truthful "how StarNet works" so the agent can guide a stuck Commander (interactive only)
@@ -16601,8 +16601,11 @@ async function runOnceCore(o) {
      chain; reveals keep 2 searches of headroom under it. A primary profile's deferConnectorTools (SuperGrok:
      quota-metered, and ~380 connector schemas per turn burned the included usage) holds granted connector tools
      behind tool.search. Task turns only — a chat turn sends no tools — and a provider with neither gets the
-     identical split. */
-  const wireCap = isTask ? wireToolCap([primaryProfile].concat(providerFallbacks.map(fb => getProviderProfile(fb.providerId)))) : 0;
+     identical split. The cap may come from a FALLBACK profile, so the warning and the notes name the profile
+     that set it (wireCapOwner), never just the primary. */
+  const wireLimit = isTask ? wireToolLimit([primaryProfile].concat(providerFallbacks.map(fb => getProviderProfile(fb.providerId)))) : { cap: 0, providerId: '' };
+  const wireCap = wireLimit.cap;
+  const wireCapOwner = wireLimit.providerId || providerId;
   const wirePlan = planWireTools({
     tools: resolved.tools, deferred: resolved.deferred, deferralOff, withheld: directDomainWithheld,
     maxTools: wireCap, reserve: 2 * TOOL_SEARCH_MAX_HITS, pinned: internalBriefTools,
@@ -16613,10 +16616,10 @@ async function runOnceCore(o) {
   // what the loop holds back, what the search can find and what the prompt names are one list.
   resolved.deferred = capCtx.deferred = wirePlan.deferred;
   if (wirePlan.spilled.length) {
-    const warnKey = providerId + '|' + wireCap + '|' + wirePlan.spilled.length;
+    const warnKey = wireCapOwner + '|' + wireCap + '|' + wirePlan.spilled.length;
     if (!wirePlanWarned.has(warnKey)) {
       wirePlanWarned.add(warnKey);
-      console.warn('[tools] ' + providerId + ' wire cap ' + wireCap + ': ' + wirePlan.spilled.length + ' tools spilled off the wire'
+      console.warn('[tools] ' + wireCapOwner + ' wire cap ' + wireCap + ': ' + wirePlan.spilled.length + ' tools spilled off the wire'
         + (wirePlan.unreachable.length ? ' (' + wirePlan.unreachable.length + ' unreachable: tool.search not granted)' : ' (tool.search can reveal them)'));
     }
   }
@@ -17100,7 +17103,7 @@ async function runOnceCore(o) {
           + 'never report an action as done when you had no tool to perform it. '
         : '')
       + (wirePlan.unreachable.length
-        ? wirePlan.unreachable.length + ' further granted tools exceed this provider\'s per-request tool limit and cannot be used this run. '
+        ? wirePlan.unreachable.length + ' further granted tools exceed the ' + wireCapOwner + ' provider\'s per-request tool limit (' + wireCap + ') and cannot be used this run. '
         : '')
       + taskDoctrineNote
       + (wireNames.indexOf('routine_create') >= 0
@@ -17584,6 +17587,7 @@ async function runOnceCore(o) {
       deferredTools: o.outputOnly ? [] : deferredToolDefs,
       // The provider chain's wire-tool ceiling (0 = none): tool.search reveals may fill the reserve, never pass it.
       maxWireTools: o.outputOnly ? 0 : wireCap,
+      maxWireToolsProvider: wireCapOwner,
       hiddenTools: o.outputOnly ? [] : ['brief_ask', 'brief_proceed', 'brief_update'],
       // A turn that asks for four file reads waited four round trips for them; an all-read-only batch now
       // overlaps. The predicate is above — the loop cannot judge tool scope on its own.
