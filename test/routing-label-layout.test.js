@@ -58,8 +58,11 @@ const ctx = {
   fillRect(x, y, w, h) { paints.push({ x, y, w, h }); }, fillText() {}
 };
 const adapter = vm.runInNewContext(source.slice(start, drawEnd) + '\ndrawRoutingNags', {
-  routingNags: nags, T: 12, scale: 2, panX: 0, panY: 0, cv: { width: 600, height: 360 }, ctx,
+  // scale 1.5 over the clamped render dpr (renderDpr caps devicePixelRatio 2 at 1.5) keeps this
+  // the same effective zoom-1 overview the scenario always modeled.
+  routingNags: nags, T: 12, scale: 1.5, panX: 0, panY: 0, cv: { width: 600, height: 360 }, ctx,
   NAG_FONT: "8px 'VT323'", selectedRoutingTile: null, window: { devicePixelRatio: 2 },
+  renderDpr: () => 1.5,
   geo: { origin: { tx: 100, ty: 200 } }, roomOfLocalTile: () => 'r1',
   station: { roomById: () => ({ rects: [{ x1: 110, y1: 205, x2: 121, y2: 213 }] }) }
 });

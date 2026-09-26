@@ -68,7 +68,7 @@ const World = (() => {
     catch (_) { return true; }   // an unreadable context is no safer to blit than a proven-lost one
   }
   function abandonCurveGL(reason) {
-    if (!_glFailed) console.warn('[crt] ' + reason + ' — switching to CPU fallback');
+    if (!_glFailed) console.warn('[crt] ' + reason + ' — barrel warp off for this session (flat tube; the per-frame CPU remap starved typing)');
     _glFailed = true; _glReady = false;
     return false;
   }
@@ -1501,9 +1501,18 @@ const World = (() => {
     cv.addEventListener('mouseleave', () => { if (kindleArmed) kindleHolding = false; hoverAgent = null; hoverBeltTile = null; hoverOutbox = null; if (!drag) cv.style.cursor = 'default'; });
   }
 
+  /* RENDER SCALE — the one clamp every canvas-pixel derivation must share. Retina reports dpr 2,
+     but every full-screen pass the tube runs (bloom downsample, barrel warp, scanlines, phosphor
+     mask, film, grain) bills by the pixel: 2.0 → 1.5 keeps only 56% of the pixels for a difference
+     the warped, scanlined glass cannot show. Screen-space sizing (fault text, nameplates, scanline
+     pitch, routing-label zoom) must read THIS, never window.devicePixelRatio raw — a device-ratio
+     draw on a clamped bitmap lands ~33% oversized. */
+  const RENDER_DPR_CAP = 1.5;
+  function renderDpr() { return Math.min(window.devicePixelRatio || 1, RENDER_DPR_CAP); }
+
   function resize() {
     if (!cv) return;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     // TEXT SIZE zoom (stationui applySettings sets body.style.zoom): zoom shrinks the canvas's
     // layout px while the painted box stays the same device size, so without this factor the
     // station upscales soft. Multiplying back keeps the bitmap 1:1 with device pixels; mouse
@@ -1531,7 +1540,7 @@ const World = (() => {
   function redrawNow() {
     if (!running || !cache) return;
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
-    frame(performance.now());
+    frame(performance.now(), true);
   }
 
   function start() { if (running) return; running = true; last = performance.now(); if (!floorLiveAt) floorLiveAt = last; frame(last); }
@@ -1813,8 +1822,11 @@ const World = (() => {
   }
   // Output pixel -> pre-CRT scene pixel. Match the renderer's six-step inverse,
   // including overscan, BEFORE undoing the camera. Drag deltas remain screen-space.
+  // A _glFailed session draws the FLAT tube (drawCurve surrendered the warp), so the pointer
+  // must not invert a warp that is no longer on screen — un-warping flat pixels would sample
+  // ~11% of half-width away at the edges and make corner props unclickable.
   function uncurvePoint(c) {
-    if (CRT.curve <= 0 || document.body.classList.contains('no-scan')) return c;
+    if (CRT.curve <= 0 || _glFailed || document.body.classList.contains('no-scan')) return c;
     const hw = cv.width / 2, hh = cv.height / 2, over = overAmt(), k = Math.max(0, +CRT.curve || 0);
     const nx = (c.x - hw) / hw / over, ny = (c.y - hh) / hh / over;
     const ro = Math.hypot(nx, ny);
@@ -1830,7 +1842,7 @@ const World = (() => {
     return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x < cv.width && y >= 0 && y < cv.height ? { x, y } : null;
   }
   function curvePoint(c) {
-    if (CRT.curve <= 0 || document.body.classList.contains('no-scan')) return c;
+    if (CRT.curve <= 0 || _glFailed || document.body.classList.contains('no-scan')) return c;   // flat tube: screen-projection must match the un-warped draw
     const hw = cv.width / 2, hh = cv.height / 2;
     const nx = (c.x - hw) / hw, ny = (c.y - hh) / hh;
     const f = (1 - Math.max(0, +CRT.curve || 0) * (nx * nx + ny * ny)) * overAmt();
@@ -6141,8 +6153,28 @@ const World = (() => {
     if (!reviewParts) return;
     const t=performance.now();reviewParts[name]=(reviewParts[name]||0)+t-reviewStamp;reviewStamp=t;
   }
-  function frame(now) {
+  /* FRAME PACING — rAF fires at the display's full rate (120Hz on ProMotion), but the tube never
+     needed it: the sim is dt-based (frameBody clamps dt), so painting at CRT cadence changes what
+     the frame COSTS, not what it shows. Uncapped, the full-canvas repaint plus the bloom/warp/CRT
+     passes pinned the WebContent main thread, and the Commander's keystrokes queued BEHIND whole
+     frames — seconds per letter on a loaded machine. 30fps is the period-correct cap; a window
+     that lost focus drops to 16 (still alive on a second screen, but typing elsewhere never pays
+     for it — macOS already parks rAF entirely when the window is fully hidden). Both budgets sit
+     UNDER frameBody's 64ms dt clamp, so a skipped frame's time accumulates into the next paint
+     and the sim never slows — 10fps would silently run the station at 0.64x while unfocused.
+     `force` is redrawNow()'s bypass: a resize repaint that waited out the budget would strobe
+     black, which is the exact bug redrawNow exists to kill. */
+  const FRAME_MS_FOCUSED = 1000 / 30, FRAME_MS_IDLE = 1000 / 16;
+  // Framerate-independent exponential ease: the camera's per-frame constants (0.08/0.16) were
+  // tuned at display rate (~120Hz, 8.33ms frames). k_eff = 1-(1-k)^(dt/8.33) reaches the same
+  // fraction of the remaining distance per unit TIME whatever the paint cadence is.
+  function easeK(k, dt) { return 1 - Math.pow(1 - k, dt / 8.33); }
+  let lastPaintAt = 0;
+  function frame(now, force) {
     if (running) raf = requestAnimationFrame(frame);   // schedule next frame FIRST — a throw below can't kill the loop
+    const budget = (typeof document.hasFocus === 'function' && !document.hasFocus()) ? FRAME_MS_IDLE : FRAME_MS_FOCUSED;
+    if (!force && now - lastPaintAt < budget - 0.5) return;
+    lastPaintAt = now;
     const reviewStart=reviewPerformance.enabled?performance.now():0;
     reviewParts=reviewPerformance.enabled?{}:null;reviewStamp=reviewStart;
     try {
@@ -6166,14 +6198,15 @@ const World = (() => {
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.imageSmoothingEnabled = false;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const cx = cv.width / 2, cy = cv.height / 2;
-    ctx.font = Math.round(28 * (window.devicePixelRatio || 1)) + 'px VT323, monospace';
-    ctx.shadowColor = 'rgba(255,80,60,0.9)'; ctx.shadowBlur = 12 * (window.devicePixelRatio || 1);
+    const dpr = renderDpr();
+    ctx.font = Math.round(28 * dpr) + 'px VT323, monospace';
+    ctx.shadowColor = 'rgba(255,80,60,0.9)'; ctx.shadowBlur = 12 * dpr;
     ctx.fillStyle = '#ff5a3c';
     ctx.fillText('RENDER FAULT', cx, cy);
-    ctx.font = Math.round(14 * (window.devicePixelRatio || 1)) + 'px VT323, monospace';
-    ctx.shadowBlur = 6 * (window.devicePixelRatio || 1);
+    ctx.font = Math.round(14 * dpr) + 'px VT323, monospace';
+    ctx.shadowBlur = 6 * dpr;
     ctx.fillStyle = '#ffb0a0';
-    ctx.fillText('the station render loop is faulting — reload if this persists', cx, cy + Math.round(26 * (window.devicePixelRatio || 1)));
+    ctx.fillText('the station render loop is faulting — reload if this persists', cx, cy + Math.round(26 * dpr));
     ctx.shadowBlur = 0; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   }
 
@@ -6306,12 +6339,15 @@ const World = (() => {
       if (!lb || lb.unplaced) camLock = null;   // subject despawned / off-floor → release (the director re-casts next frame if it owns the camera)
       else {
         const ts = camLock.sc, lx = cv.width / 2 - bodyPosX(lb) * ts, ly = cv.height * 0.56 - bodyPosY(lb) * ts;
-        const k = 0.08;   // softer than the one-shot focus ease (0.16): a trailing, cinematic follow of a moving body
+        // softer than the one-shot focus ease (0.16): a trailing, cinematic follow of a moving body.
+        // easeK: the per-frame constants were tuned on a high-refresh display; the 30fps cap would
+        // quadruple their half-life, so correct by dt to keep the exact shipped feel at any cadence.
+        const k = easeK(0.08, dt);
         scale += (ts - scale) * k; panX += (lx - panX) * k; panY += (ly - panY) * k;
       }
     }
     if (camLerp && !camAnim && !camLock) {   // gently ease toward a conversation framing (set by focusAgent); the awakening camera + a follow-lock win
-      const k = 0.16;
+      const k = easeK(0.16, dt);
       scale += (camLerp.scale - scale) * k; panX += (camLerp.panX - panX) * k; panY += (camLerp.panY - panY) * k;
       if (Math.abs(camLerp.scale - scale) < 0.01 && Math.abs(camLerp.panX - panX) < 1 && Math.abs(camLerp.panY - panY) < 1) {
         scale = camLerp.scale; panX = camLerp.panX; panY = camLerp.panY; camLerp = null;
@@ -6586,7 +6622,7 @@ const World = (() => {
     drawRoutingNags(now); // BELT LEGIBILITY: the compiled plan's errors as in-world callouts on the broken piece
     if (bayLabels.length && PropSprites.drawBayNames) {
       PropSprites.setCtx(ctx);
-      PropSprites.drawBayNames(bayLabels, scale, window.devicePixelRatio || 1);
+      PropSprites.drawBayNames(bayLabels, scale, renderDpr());
     }
     drawBeltHoverTag(now);// BELT LEGIBILITY: hover a belt tile → where does this line flow (a glance, never a window)
     drawOutboxHoverTag(now);// OUTBOX LEGIBILITY: hover the stacked chute → what the crates are + what a click does
@@ -6642,7 +6678,7 @@ const World = (() => {
   function drawCRT(now) {
     if (!cv || document.body.classList.contains('no-scan')) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     const W = cv.width, H = cv.height;
     /* COLOUR BLEED — the beam does not stop at a pixel edge; every bright edge smears a hair to the right.
        The frame is drawn over itself shifted one device pixel, additively at a low alpha. One full-frame
@@ -6788,7 +6824,15 @@ const World = (() => {
     if (!cv || (CRT.curve <= 0 && !sharpAmt()) || document.body.classList.contains('no-scan')) return;
     const k = Math.max(0, +CRT.curve || 0), W = cv.width, H = cv.height;
     if (!_glFailed && drawCurveGL(k, W, H)) return;   // GPU path (near-free); on any failure it flips _glFailed
-    drawCurveCPU(k, W, H);                             // CPU fallback (per-pixel LUT) — identical look, heavier
+    /* GPU warp is gone (context loss / probe fault). The old fallback was drawCurveCPU — a full-res
+       getImageData + per-pixel JS remap of the whole frame, EVERY frame, forever (_glFailed never
+       resets in-session). At retina sizes that is hundreds of ms per frame: the renderer main
+       thread saturates and typing crawls — a faulted session must degrade to a FLAT tube, not a
+       frozen one. So: geometry (warp + sharpen) is surrendered, the edge vignette is kept (cheap
+       gradient), and the loss was already announced once by abandonCurveGL's console line.
+       drawCurveCPU stays defined: it documents the pixel math and remains the GL probe's
+       pixel-parity reference. */
+    drawEdgeVignette(W, H);
   }
 
   // GPU barrel warp: upload the frame as a texture and remap it in a fragment shader (same inverse of
@@ -6798,7 +6842,7 @@ const World = (() => {
     try {
       _glc = document.createElement('canvas'); _glc.width = W; _glc.height = H;
       // A WebView/GPU reset reports context loss as WebGL state, not a JavaScript exception. Mark the GPU path
-      // unusable immediately; the next drawCurve() frame takes the existing pixel-identical CPU warp.
+      // unusable immediately; the next drawCurve() frame degrades to the flat tube (warp surrendered).
       _glc.addEventListener('webglcontextlost', ev => {
         try { ev.preventDefault(); } catch (_) {}
         abandonCurveGL('WebGL context lost');
@@ -6870,8 +6914,8 @@ const World = (() => {
       // WKWebView's GL sits on a different backend (ANGLE-on-Metal) than Windows — a channel-order/
       // tint divergence there recolors the ENTIRE feed while every 2D pass stays correct. Compare the
       // whole frame's channel ratios (16×16 GPU downscale, ~1KB read) before/after on a few chromatic
-      // frames; on divergence, warn with both readings and hand the session to drawCurveCPU
-      // (pixel-identical by construction). Zero cost after validation.
+      // frames; on divergence, warn with both readings and surrender the warp for the session
+      // (flat tube — see drawCurve; the per-frame CPU remap starved typing). Zero cost after validation.
       const probing = !_glProbeOk && _glProbeTries < 30 && (_glProbeSkip++ % 45) === 0;
       let pre = null;
       if (probing) { try { pre = probeMeans(cv); } catch (_) { _glProbeTries = 30; pre = null; } }
@@ -6898,8 +6942,8 @@ const World = (() => {
         const fail = why => {
           console.warn('[crt] WebGL warp output diverges from its source (in ' + pre.map(v => v.toFixed(0))
             + ' → out ' + post.map(v => v.toFixed(0)) + ', ' + why
-            + ') — platform GL bug; switching to the identical CPU warp');
-          _glFailed = true;   // this frame already blitted; every following frame takes drawCurveCPU
+            + ') — platform GL bug; barrel warp off for this session (flat tube)');
+          _glFailed = true;   // this frame already blitted; every following frame draws the flat tube (see drawCurve)
         };
         if (preSum >= 15) {   // a lit frame carries full judgment; each consumes one bounded try
           _glProbeTries++;
@@ -6928,7 +6972,6 @@ const World = (() => {
     } catch (e) { return abandonCurveGL('WebGL curve draw failed: ' + ((e && e.message) || String(e))); }
   }
   function drawCurveCPU(k, W, H) {
-    const hw = W / 2, hh = H / 2;
     if (!_warpCv) { _warpCv = document.createElement('canvas'); _warpCtx = _warpCv.getContext('2d', { willReadFrequently: true }); }
     if (_warpCv.width !== W || _warpCv.height !== H) { _warpCv.width = W; _warpCv.height = H; }
     _warpCtx.setTransform(1, 0, 0, 1, 0, 0); _warpCtx.clearRect(0, 0, W, H); _warpCtx.drawImage(cv, 0, 0);
@@ -6943,10 +6986,18 @@ const World = (() => {
       for (let i = 0; i < d32.length; i++) { const s = lut[i]; d32[i] = s < 0 ? BLACK : s32[s]; }
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.putImageData(_outImg, 0, 0);
-    // Edge vignette — the exact darkening complement of the shader's `1 - uVig·ro²`, so the CPU fallback
-    // stays pixel-equivalent to the GPU path (drawCurveGL's probe compares them). A stop at gradient
-    // fraction t sits at panel radius t·√2, which the shader sees as ro = t·√2/over, hence alpha = vig·ro².
-    ctx.save(); ctx.globalCompositeOperation = 'source-over'; ctx.translate(hw, hh); ctx.scale(hw, hh);
+    drawEdgeVignette(W, H);
+  }
+
+  // Edge vignette — the exact darkening complement of the shader's `1 - uVig·ro²`, so the CPU fallback
+  // stays pixel-equivalent to the GPU path (drawCurveGL's probe compares them). A stop at gradient
+  // fraction t sits at panel radius t·√2, which the shader sees as ro = t·√2/over, hence alpha = vig·ro².
+  // Also the whole of the flat-tube degradation drawCurve() takes when the GPU warp is lost.
+  function drawEdgeVignette(W, H) {
+    if (vigAmt() <= 0) return;   // curve 0 → no vignette: don't rasterize a full-canvas transparent gradient
+    const hw = W / 2, hh = H / 2;
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over'; ctx.translate(hw, hh); ctx.scale(hw, hh);
     const vAmt = vigAmt(), o2 = overAmt() * overAmt();
     const vAlpha = t => Math.max(0, Math.min(1, vAmt * 2 * t * t / o2)).toFixed(4);
     const vg = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.SQRT2);
@@ -7396,7 +7447,7 @@ const World = (() => {
   function drawNameplate(now, who) {
     who = who || agent;
     if (!cache || !who) return;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = false;
     const Wc = cv.width / dpr, Hc = cv.height / dpr;
     const suit = who.color || '#ffaa33';
@@ -7593,7 +7644,7 @@ const World = (() => {
     // draw in SCREEN space (mirrors drawNameplate): pixel-snapped, unsmoothed VT323 that reads cleanly at any
     // zoom, then it rides the same barrel-curve/scanline pass the rest of the feed does. All geometry is CSS px.
     ctx.save();
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = false;
     const Wc = cv.width / dpr, Hc = cv.height / dpr;
     const suit = who.color || '#ffaa33';
@@ -7708,7 +7759,7 @@ const World = (() => {
        that cannot be got wrong later, and it is scoped HERE so the spoken-line path stays byte-
        identical to what shipped. */
     ctx.save();
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = false;
     const Wc = cv.width / dpr, Hc = cv.height / dpr;
     const suit = who.color || '#ffaa33';
@@ -8006,7 +8057,7 @@ const World = (() => {
     const viewport = { x: (4 - panX) / scale, y: (4 - panY) / scale,
       w: Math.max(0, (cv.width - 8) / scale), h: Math.max(0, (cv.height - 8) / scale) };
     const labels = layoutRoutingNagLabels(routingNags, {
-      tile: T, zoom: scale / (window.devicePixelRatio || 1), viewport, selected: selectedRoutingTile,
+      tile: T, zoom: scale / renderDpr(), viewport, selected: selectedRoutingTile,
       measure: text => ctx.measureText(text).width,
       containerFor: n => {
         const id = roomOfLocalTile(n.x, n.y), room = id && station.roomById && station.roomById(id);
@@ -9800,7 +9851,7 @@ const World = (() => {
      bridge is genuinely down (linkStaleDim) — clears itself the frame the link recovers. */
   const LINK_FONT = "13px 'VT323','Courier New',monospace";
   function drawLinkDown(now) {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = renderDpr();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.imageSmoothingEnabled = false;
     const W = cv.width / dpr;
     const pulse = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(now / 300));   // slow breathing so it never looks stuck
@@ -9988,7 +10039,7 @@ const World = (() => {
     let means = null;
     try { if (cv) means = probeMeans(cv); } catch (_) {}
     return {
-      path: _glFailed ? 'cpu' : (_glReady ? 'webgl' : 'uninitialized'),
+      path: _glFailed ? 'flat' : (_glReady ? 'webgl' : 'uninitialized'),   // 'flat' = warp surrendered (no per-frame CPU remap; see drawCurve)
       ready: _glReady, failed: _glFailed, lost: glContextLost(_gl),
       frameSum: means ? Math.round(means[0] + means[1] + means[2]) : null
     };
@@ -10179,7 +10230,7 @@ const World = (() => {
     _dbgReviewPerformance: enabled => {
       const samples=reviewPerformance.samples.slice();
       if(typeof enabled==='boolean'){reviewPerformance.enabled=enabled;reviewPerformance.samples=[];}
-      return {samples,renderFaults,props:geo?.props.length||0,scale,canvas:cv?[cv.width,cv.height]:null,crtBackend:_glFailed?'cpu':_glReady?'webgl':'uninitialized',probeBackend:probeAsyncFailed?'sync-backstop':'async'};
+      return {samples,renderFaults,props:geo?.props.length||0,scale,canvas:cv?[cv.width,cv.height]:null,crtBackend:_glFailed?'flat':_glReady?'webgl':'uninitialized',probeBackend:probeAsyncFailed?'sync-backstop':'async'};
     },
     // Local catalog audit: real geometry, routing, approach, claim and arrival
     // functions. Actor positioning/arrival are controlled fixture setup, not

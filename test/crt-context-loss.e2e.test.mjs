@@ -2,7 +2,8 @@
 
    The production WebGL warp owns an offscreen canvas, so the test asks its existing debug surface
    to invoke WEBGL_lose_context on that exact context. The visible 2D feed must remain lit on the
-   same page because drawCurve() falls through to its CPU warp before clearing the source frame. */
+   same page because drawCurve() degrades to the flat tube (warp surrendered, vignette kept)
+   without ever clearing the source frame. */
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -80,14 +81,14 @@ try {
   let after = null;
   for (let i = 0; i < 60; i++) {
     after = await evalJS(cdp, 'World._dbgCurveState()');
-    if (after && after.path === 'cpu' && after.frameSum > 5) break;
+    if (after && after.path === 'flat' && after.frameSum > 5) break;
     await sleep(100);
   }
-  check('same page abandons WebGL for the CPU warp', !!after && after.path === 'cpu', JSON.stringify(after));
+  check('same page abandons WebGL for the flat tube (warp surrendered, no per-frame CPU remap)', !!after && after.path === 'flat', JSON.stringify(after));
   check('camera feed stays lit after context loss', !!after && after.frameSum > 5, JSON.stringify(after));
   check('recovery does not reload the page', await evalJS(cdp, 'performance.timeOrigin') === timeOrigin);
 
-  const lossWarnings = diagnostics.consoleMsgs.filter(row => /WebGL context lost.*CPU fallback/i.test(row.text));
+  const lossWarnings = diagnostics.consoleMsgs.filter(row => /WebGL context lost.*flat tube/i.test(row.text));
   check('one truthful context-loss fallback warning is logged', lossWarnings.length === 1, JSON.stringify(diagnostics.consoleMsgs));
   check('context loss raises no uncaught exception', diagnostics.exceptions.length === 0, JSON.stringify(diagnostics.exceptions));
 } catch (error) {

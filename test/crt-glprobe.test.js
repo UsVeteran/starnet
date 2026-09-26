@@ -9,10 +9,11 @@
    canary is Windows-only; CDP-drive doesn't port to WKWebView — qa/STATUS 2026-07-14), so the fix is
    a runtime self-check: the warp only MOVES pixels and applies channel-neutral vignette, so the
    frame's global channel character must survive it. Three clean probes latch trust; a divergent one
-   warns with both readings and hands the session to drawCurveCPU (pixel-identical by construction).
+   warns with both readings and surrenders the warp for the session (flat tube — the old per-frame
+   drawCurveCPU remap starved typing; drawCurveCPU remains only as the parity reference).
 
    Locked here: (1) the probe wiring exists in drawCurveGL (sample before upload, sample after blit,
-   _glFailed on divergence, CPU-warp warn); (2) the detector math verdicts on the six canonical
+   _glFailed on divergence, flat-tube warn); (2) the detector math verdicts on the six canonical
    inputs — healthy identity, healthy vignette, the mac wash (bright + dim), a channel swap, and a
    black boot frame (must keep waiting, not judge). Thresholds are extracted FROM world.js source so
    this test cannot drift silently from the shipped predicate. */
@@ -35,8 +36,8 @@ const blitIdx = glBody.indexOf('drawImage(_glc');
 const postIdx = glBody.indexOf('post = probeMeans(cv)');
 A.ok(preIdx > 0 && upIdx > 0 && preIdx < upIdx, 'input sampled BEFORE the texture upload');
 A.ok(blitIdx > 0 && postIdx > blitIdx, 'output sampled AFTER the GL blit lands back on the feed');
-A.ok(/_glFailed = true/.test(glBody.slice(postIdx)), 'a divergent reading flips _glFailed (CPU fallback takes over)');
-A.ok(glBody.indexOf('switching to the identical CPU warp') > 0, 'the divergence warn names the fallback');
+A.ok(/_glFailed = true/.test(glBody.slice(postIdx)), 'a divergent reading flips _glFailed (flat tube takes over)');
+A.ok(glBody.indexOf('barrel warp off for this session (flat tube)') > 0, 'the divergence warn names the fallback');
 A.ok(/_glProbeClean >= 3/.test(glBody), 'trust latches only after three clean probes');
 A.ok(/_glProbeTries < 30/.test(glBody), 'probing is bounded (stops trying after 30 attempts)');
 A.ok(glBody.indexOf('bright output minted from a dark input') > 0,
@@ -51,7 +52,7 @@ A.ok(secondLossGuard > drawIdx && secondLossGuard < clearIdx,
 A.ok(/addEventListener\('webglcontextlost'/.test(src) && /ev\.preventDefault\(\)/.test(src),
   'the offscreen curve canvas listens for the browser context-loss event');
 A.ok(/function abandonCurveGL[\s\S]{0,400}_glFailed = true; _glReady = false/.test(src),
-  'one abandon seam permanently routes the session to the CPU warp');
+  'one abandon seam permanently routes the session to the flat tube');
 A.ok(/_dbgLoseCurveContext[\s\S]{0,500}getExtension\('WEBGL_lose_context'\)[\s\S]{0,300}loseContext\(\)/.test(src),
   'the deterministic live regression invokes WEBGL_lose_context on the production warp');
 // tries must be consumed ONLY on judged (lit) frames — a long dark awakening must never
