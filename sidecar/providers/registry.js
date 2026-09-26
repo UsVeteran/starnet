@@ -74,8 +74,9 @@
     },
     {
       // GROK OAUTH — Grok on a SuperGrok / X Premium+ subscription via the RFC 8628 device-code flow (no API
-      // key). Inference is OpenAI-compatible at api.x.ai/v1 with the OAuth access token riding in AS the Bearer
-      // key. Separate id from the API-key 'xai' profile above (same wire, different auth), like codex vs openai.
+      // key). Inference is OpenAI-compatible at cli-chat-proxy.grok.com/v1 (subscription quota), NOT api.x.ai
+      // (pay-per-token). The CLI proxy requires Grok-CLI identity headers or it returns 426 / 402. Separate id
+      // from the API-key 'xai' profile (same models family, different auth + endpoint), like codex vs openai.
       id: 'grok',
       aliases: ['grok-oauth', 'xai-oauth'],
       name: 'Grok (xAI)',
@@ -88,9 +89,20 @@
       authType: 'oauth_device_code',
       keyRequired: false,
       modelsRequireAuth: true,
-      baseUrl: 'https://api.x.ai/v1',
+      maxTools: 340,   // wire-tool budget: xAI rejects a request carrying >350 tools ("Maximum tools limit reached")
+      baseUrl: 'https://cli-chat-proxy.grok.com/v1',
+      // Required by cli-chat-proxy — without these, chat returns 426 or spending-limit errors. The ONLY copy:
+      // the factory applies it to every grok request (chat, /models, fallbacks).
+      extraHeaders: {
+        'x-xai-token-auth': 'xai-grok-cli',
+        'x-grok-client-identifier': 'grok-shell',
+        'x-grok-client-version': '0.1.202'
+      },
+      // The proxy gates on the client version (426 when it is too old), so it moves without a rebuild:
+      // STARNET_GROK_CLIENT_VERSION (or SKYNET_) overrides the default above; invalid values keep the default.
+      extraHeadersEnv: { 'x-grok-client-version': ['STARNET_GROK_CLIENT_VERSION', 'SKYNET_GROK_CLIENT_VERSION'] },
       modelsPath: '/models',
-      defaultReasoningEffort: 'medium',
+      defaultReasoningEffort: 'low',
       unmetered: true,
       credentialPool: false,
       supportsTools: true,
@@ -99,6 +111,7 @@
       // Fallback roster for when the live /models catalog is unreachable (the xAI OAuth surface can 403 an
       // allowlisted-out account). Conservative, tools-only capability; the live catalog always wins when present.
       staticModels: [
+        { id: 'grok-4.7', name: 'Grok 4.7', context_length: 256000, supportsTools: true, supportsReasoning: true },
         { id: 'grok-4', name: 'Grok 4', context_length: 256000, supportsTools: true, supportsReasoning: true },
         { id: 'grok-3', name: 'Grok 3', context_length: 131072, supportsTools: true, supportsReasoning: false },
         { id: 'grok-code-fast-1', name: 'Grok Code Fast 1', context_length: 256000, supportsTools: true, supportsReasoning: false }
@@ -257,7 +270,7 @@
     },
     {
       // NOTE: 'grok' is intentionally NO LONGER an alias here — it is now the id of the OAuth (subscription)
-      // Grok profile below. This api.x.ai/v1 profile is the API-KEY Grok ('XAI'), a separate id, exactly as
+      // Grok profile above. This api.x.ai/v1 profile is the API-KEY Grok ('XAI'), a separate id, exactly as
       // 'openai' (API key) and 'codex' (OAuth) coexist. Users choosing "GROK OAUTH" vs "XAI" pick their auth.
       id: 'xai',
       priceFamily: 'xai',   // prices.js table — this endpoint's /models publishes no pricing
@@ -271,6 +284,7 @@
       apiMode: 'chat_completions',
       authType: 'api_key',
       keyRequired: true,
+      maxTools: 340,   // same xAI 350-tool request limit as the OAuth profile (400 "Maximum tools limit reached")
       keyEnv: ['XAI_API_KEY', 'X_AI_API_KEY'],
       modelsRequireAuth: true,
       baseUrl: 'https://api.x.ai/v1',

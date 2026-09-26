@@ -3664,8 +3664,9 @@ function oauthDeviceConfig(id, deviceId) {
   }
   return null;
 }
-// Extra inference headers for a device-OAuth provider (kimi's X-Msh-* set; grok needs none). The registry
-// profile carries the STATIC kimi headers; these add the runtime OS version + device id, merged by the factory.
+// Extra inference headers for a device-OAuth provider (kimi's X-Msh-* set). The registry profile carries the
+// STATIC headers (kimi's X-Msh-*, grok's Grok-CLI identity + its env-overridable client version); these add
+// only runtime values (kimi's OS version + device id), merged over the profile's by the factory.
 function oauthInferenceHeaders(id) {
   const entry = oauthProviders[id];
   if (id === 'kimi' && entry) return kimiMshHeaders(entry.deviceId);

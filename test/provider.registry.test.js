@@ -142,7 +142,7 @@ module.exports = (async () => {
   {
     const grok = factory.getProviderProfile('grok');
     A.eq(grok.authType, 'oauth_device_code', 'grok is an oauth_device_code profile');
-    A.eq(grok.baseUrl, 'https://api.x.ai/v1', 'grok inference base URL is api.x.ai/v1');
+    A.eq(grok.baseUrl, 'https://cli-chat-proxy.grok.com/v1', 'grok inference base URL is cli-chat-proxy (subscription)');
     A.eq(grok.unmetered, true, 'grok is unmetered (subscription)');
     A.eq(grok.adapter, 'openai-compatible', 'grok inference rides the openai-compatible adapter');
     const kimi = factory.getProviderProfile('kimi');
@@ -154,6 +154,51 @@ module.exports = (async () => {
     A.ok(kimiProv && typeof kimiProv.stream === 'function', 'kimi selects an OpenAI-compatible adapter on an OAuth token');
     const grokRoster = await factory.selectProvider({ provider: 'grok', token: 't', fetch: async () => new Response(JSON.stringify({ data: [] }), { status: 200 }) }).listModels();
     A.ok(grokRoster.find(m => m.id === 'grok-4'), 'grok static roster fills the empty catalog');
+    A.ok(grokRoster.find(m => m.id === 'grok-4.7'), 'grok static roster carries grok-4.7');
+    A.eq(grok.maxTools, 340, 'grok declares the xAI wire-tool budget (limit 350)');
+    A.eq(factory.getProviderProfile('xai').maxTools, 340, 'the API-key xAI shares the wire-tool budget');
+    A.eq(factory.defaultReasoningEffortForProvider('grok'), 'low', 'grok (SuperGrok subscription) defaults to low reasoning');
+    A.eq(factory.defaultReasoningEffortForProvider('xai'), 'medium', 'API-key xAI default reasoning unchanged');
+  }
+
+  /* ---- Grok OAuth wire: SuperGrok subscription quota lives behind cli-chat-proxy, which requires the Grok-CLI
+     identity headers (426/402 without them). api.x.ai with the same token bills pay-per-token instead, so the
+     endpoint + headers are locked here, on chat AND the /models probe, and never leak onto the API-key xAI. */
+  {
+    const GROK_ENV = ['STARNET_GROK_CLIENT_VERSION', 'SKYNET_GROK_CLIENT_VERSION'];
+    const grokWire = async (id, env) => {
+      const prev = GROK_ENV.map(n => process.env[n]);
+      GROK_ENV.forEach(n => { if (env && env[n] != null) process.env[n] = env[n]; else delete process.env[n]; });
+      try {
+        const calls = [];
+        const p = factory.selectProvider({ provider: id, token: 'oauth-tok', key: 'api-key', fetch: async (url, init) => {
+          calls.push({ url: String(url), method: (init && init.method) || 'GET', headers: Object.assign({}, init && init.headers) });
+          if (init && init.method === 'POST') return new Response('data: [DONE]\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+          return new Response(JSON.stringify({ data: [] }), { status: 200 });
+        } });
+        await p.listModels();
+        for await (const _ of p.stream({ model: 'grok-4.7', messages: [{ role: 'user', content: 'hi' }] })) { /* drain */ }
+        return { chat: calls.find(c => c.method === 'POST'), models: calls.find(c => c.method === 'GET' && /\/models$/.test(c.url)) };
+      } finally {
+        GROK_ENV.forEach((n, i) => { if (prev[i] == null) delete process.env[n]; else process.env[n] = prev[i]; });
+      }
+    };
+    const w = await grokWire('grok');
+    A.eq(w.chat && w.chat.url, 'https://cli-chat-proxy.grok.com/v1/chat/completions', 'grok chat goes to cli-chat-proxy, not api.x.ai');
+    A.eq(w.chat.headers.Authorization, 'Bearer oauth-tok', 'grok chat carries the OAuth access token as the bearer');
+    A.eq(w.chat.headers['x-xai-token-auth'], 'xai-grok-cli', 'grok chat carries x-xai-token-auth');
+    A.eq(w.chat.headers['x-grok-client-identifier'], 'grok-shell', 'grok chat carries x-grok-client-identifier');
+    A.eq(w.chat.headers['x-grok-client-version'], factory.getProviderProfile('grok').extraHeaders['x-grok-client-version'], 'grok chat carries the default client version');
+    A.eq(w.models && w.models.url, 'https://cli-chat-proxy.grok.com/v1/models', 'grok /models probe goes to cli-chat-proxy');
+    A.eq(w.models.headers['x-xai-token-auth'], 'xai-grok-cli', 'grok /models probe carries the CLI identity headers');
+    A.eq((await grokWire('grok', { STARNET_GROK_CLIENT_VERSION: '0.2.93' })).chat.headers['x-grok-client-version'], '0.2.93', 'STARNET_GROK_CLIENT_VERSION overrides the client version');
+    A.eq((await grokWire('grok', { SKYNET_GROK_CLIENT_VERSION: '0.3.1' })).chat.headers['x-grok-client-version'], '0.3.1', 'the SKYNET_ spelling also overrides');
+    const dflt = factory.getProviderProfile('grok').extraHeaders['x-grok-client-version'];
+    A.eq((await grokWire('grok', { STARNET_GROK_CLIENT_VERSION: '1.0\r\nx-evil: 1' })).chat.headers['x-grok-client-version'], dflt, 'a CR/LF override is refused (default kept)');
+    A.eq((await grokWire('grok', { STARNET_GROK_CLIENT_VERSION: 'has space' })).chat.headers['x-grok-client-version'], dflt, 'a whitespace override is refused (default kept)');
+    const x = await grokWire('xai');
+    A.eq(x.chat && x.chat.url, 'https://api.x.ai/v1/chat/completions', 'the API-key xAI stays on api.x.ai');
+    A.ok(!Object.keys(x.chat.headers).some(h => /^x-grok-|^x-xai-token-auth$/i.test(h)), 'the API-key xAI sends no Grok-CLI headers');
   }
 
   /* ---- starnet endpoint truth (2026-08-25 stranded-user incident) ----
