@@ -158,5 +158,6 @@
     };
   }
 
-  return { makeToolSearchTool };
+  // MAX_HITS is exported so the host can size the wire headroom a search may consume (capability/wire-plan.js).
+  return { makeToolSearchTool, MAX_HITS };
 });

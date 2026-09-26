@@ -3,7 +3,7 @@
    clock / signal. Every observable transition is a validated U.bus event (via the injected emit).
 
    runAgentLoop({ messages, provider, emit, tools, limits, signal, clock, cost, dispatch, capCtx,
-                  agentId, runId, model, trigger }) -> { reason, messages, usd, turns }
+                  agentId, runId, model, trigger, deferredTools?, maxWireTools? }) -> { reason, messages, usd, turns }
 
    Invariants:
      - GUARDS run before any paid call (cancelled / max_iters / budget).
@@ -501,6 +501,31 @@
     for (const d of (o.deferredTools || [])) {
       const n = d && d.function && d.function.name;
       if (n) deferredDefs.set(wireKey(n), d);
+    }
+    /* PROVIDER WIRE CEILING (o.maxWireTools; 0/absent = none, byte-identical to before). xAI 400s a request
+       carrying >350 tools; the host planned the advertised list under this (capability/wire-plan.js), and a
+       reveal may fill the remaining room but never pass it. What does not fit stays deferred, and the search
+       result is corrected so it never claims a tool that was not added. */
+    const maxWireTools = (typeof o.maxWireTools === 'number' && isFinite(o.maxWireTools) && o.maxWireTools > 0)
+      ? Math.floor(o.maxWireTools) : 0;
+    function fitReveals(results) {
+      let room = maxWireTools - tools.length;
+      const taken = new Set();
+      for (const r of results) {
+        const reveal = r && r.control && r.control.revealTools;
+        if (!Array.isArray(reveal)) continue;
+        const kept = [], dropped = [];
+        for (const name of reveal) {
+          const key = wireKey(name);
+          // Already advertised, never deferred, or earlier in this batch: the reveal step skips it either way.
+          if (!deferredDefs.has(key) || taken.has(key)) { kept.push(name); continue; }
+          if (room > 0) { room--; taken.add(key); kept.push(name); } else dropped.push(name);
+        }
+        if (!dropped.length) continue;
+        r.control = Object.assign({}, r.control, { revealTools: kept });
+        r.content = String(r.content == null ? '' : r.content) + '\n\nNOT loaded — this provider\'s per-request tool limit ('
+          + maxWireTools + ') is reached, so these cannot be called this run: ' + dropped.join(', ') + '.';
+      }
     }
     const limits = o.limits || {};
     // Missing/zero means the Commander did not opt into a turn ceiling. Operational
@@ -1496,6 +1521,7 @@
         emit('agent.run.error', { agentId, runId, message: String((e && e.message) || e), transient: false });
         return end('error', { failureStage: 'tool_boundary', failureCode: (e && e.fatalToRun) ? 'durability_boundary' : 'tool_dispatch_failure' });
       } finally { bookToolCosts(); }
+      if (maxWireTools) fitReveals(results);   // before the results reach the transcript, so the correction does too
       for (const r of results) messages.push(toolResultMsg(r.callId, r.isError, r.content));
       for (const call of calls) {
         const receipt = results.find(r => r.callId === call.id);
@@ -1599,6 +1625,7 @@
         const reveal = r.control && r.control.revealTools;
         if (!Array.isArray(reveal)) continue;
         for (const name of reveal) {
+          if (maxWireTools && tools.length >= maxWireTools) break;   // fitReveals already trimmed; the ceiling holds regardless
           const key = wireKey(name);
           const def = deferredDefs.get(key);
           if (!def) continue;

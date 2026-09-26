@@ -225,5 +225,52 @@ const DEFERRED = ['page.screenshot', 'page.upload'];
     A.eq(res.reason, 'done', 'omitting deferredTools entirely is a no-op — the old call shape still works');
   }
 
+  // ---- F. a provider wire ceiling bounds reveals, and the search result never claims what was not added ----
+  {
+    const runWith = async (maxWireTools) => {
+      const registry = fixture();
+      const seen = [];
+      const provider = {
+        priceOf, contextLimit: () => 0,
+        stream: async function* (req) {
+          seen.push({ tools: req.tools.map(t => t.function.name).sort(), messages: req.messages.slice() });
+          if (seen.length === 1) {
+            yield { type: 'tool_start', index: 0, id: 'c1', name: 'tool_search' };
+            yield { type: 'tool_args', index: 0, chunk: '{"query":"screenshot upload"}' };
+            yield { type: 'tool_done', index: 0 };
+            yield { type: 'done', finishReason: 'tool_calls' };
+          } else { yield { type: 'text', delta: 'ok' }; yield { type: 'done', finishReason: 'stop' }; }
+        }
+      };
+      const core = registry.wireFormat(registry.list(new Set(['page.open', 'tool.search'])));
+      const deferredDefs = registry.wireFormat(registry.list(new Set(DEFERRED)));
+      const fromWire = new Map();
+      for (const d of core.concat(deferredDefs)) { const real = d.function.name; const w = real.replace(/\./g, '_'); fromWire.set(w, real); d.function.name = w; }
+      const res = await runAgentLoop({
+        messages: [{ role: 'user', content: 'screenshot then upload' }], provider, emit: makeEmitter(A.makeBus(), () => {}),
+        cost: makeCostEngine({ priceOf }), tools: core, deferredTools: deferredDefs, maxWireTools,
+        dispatch: (c, ctx) => registry.dispatch(fromWire.has(c.name) ? Object.assign({}, c, { name: fromWire.get(c.name) }) : c, ctx),
+        capCtx: makeCapCtx({ agentId: 'a', room: 'r', hasCompute: true, tools: ['page.open', 'tool.search'].concat(DEFERRED), deferred: DEFERRED.slice(), approvalRules: {} }, { timeoutMs: 5000 }),
+        model: 'm', agentId: 'a', runId: 'r'
+      });
+      return { res, seen, core };
+    };
+
+    const open = await runWith(undefined);
+    A.eq(open.seen[1].tools, ['page_open', 'page_screenshot', 'page_upload', 'tool_search'], 'no ceiling: both matches are revealed (the search really hits two)');
+
+    const capped = await runWith(3);
+    A.eq(capped.res.reason, 'done', 'a ceiling-bound reveal does not wedge the run');
+    A.eq(capped.seen[1].tools, ['page_open', 'page_screenshot', 'tool_search'], 'the reveal filled the one free slot, in hit order, and stopped at the ceiling');
+    A.ok(capped.seen.every(s => s.tools.length <= 3), 'the wire never grew past maxWireTools');
+    const result = capped.seen[1].messages.find(m => m.role === 'tool');
+    A.ok(/NOT loaded/.test(result.content) && result.content.indexOf('page.upload') >= 0, 'the search result tells the model which match was NOT loaded');
+    A.ok(/limit \(3\)/.test(result.content), 'and why');
+    A.eq(capped.core.length, 2, 'the caller\'s tools array is untouched by reveals');
+
+    const zero = await runWith(0);
+    A.eq(zero.seen[1].tools, open.seen[1].tools, 'maxWireTools 0 is no ceiling (byte-identical to omitting it)');
+  }
+
   A.report('toolsearch.test');
 })().catch(e => { console.log('THREW', e && e.stack || e); process.exit(1); });
