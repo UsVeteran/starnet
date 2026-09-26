@@ -176,10 +176,14 @@
      xAI's SuperGrok subscription says it as a 429 {code:'subscription:free-usage-exhausted', error:"You've used
      all the included free usage for model …"} — the same spent allowance, so the same terminal class. */
   const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)|usage[-_ ]?exhausted|used all (?:of )?(?:the |your )?included (?:free )?usage/;
-  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|rpm|tpm|requests per/;
+  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|\brpm\b|\btpm\b|requests per/;
   function isQuotaExhausted(low) { return QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low); }
   // structured codes for the same spent allowance (Codex usage_limit_reached, xAI subscription:free-usage-exhausted)
   const QUOTA_CODE_RE = /usage_limit_reached|quota_exhausted|plan_limit|usage[-_ ]?exhausted/;
+  /* The xAI allowance wording ONLY — what a 402 may carry and still be quota_exhausted. The full QUOTA_EXHAUSTED_RE
+     includes "resets at <digit>", and on a 402 that phrase is the rate-window read ("rate limit exceeded, resets
+     at 12:00 UTC" stays retryable rate_limit); the whole regex there would flip it terminal. */
+  const ALLOWANCE_SPENT_RE = /usage[-_ ]?exhausted|used all (?:of )?(?:the |your )?included (?:free )?usage/;
   /* An account with no money (or at its spending cap) is BILLING, and no wait fixes it: OpenAI answers
      insufficient_quota with 429, and xAI's API-key surface answers an empty team with 429 "used all available
      credits or reached its monthly spending limit". */
@@ -203,7 +207,7 @@
         // still an empty wallet (Payment Required, so billing reads first), and "used all the included free
         // usage" is a spent allowance, which — unlike billing — another provider can pick up.
         if (TERMINAL_BILLING_RE.test(low)) return 'billing';
-        if (isQuotaExhausted(low) || QUOTA_CODE_RE.test(String(code || '').toLowerCase())) return 'quota_exhausted';
+        if ((ALLOWANCE_SPENT_RE.test(low) && !SHORT_WINDOW_RE.test(low)) || QUOTA_CODE_RE.test(String(code || '').toLowerCase())) return 'quota_exhausted';
         return /(resets? at|retry[- ]?after|rate limit)/.test(low) ? 'rate_limit' : 'billing';
       }
       if (status === 404) return 'model_not_found';

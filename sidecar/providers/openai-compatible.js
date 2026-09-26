@@ -64,6 +64,15 @@
     }
     return '';
   }
+  /* A flat string `error`, joined to its OAuth-style `error_description` when present:
+     {error:"invalid_token", error_description:"The access token expired"} -> "invalid_token: The access token
+     expired" (the token alone dropped the only human words). '' when `error` is not a non-empty string. */
+  function flatErrorText(data) {
+    const e = data && data.error;
+    if (typeof e !== 'string' || !e) return '';
+    const desc = typeof data.error_description === 'string' ? data.error_description.trim() : '';
+    return desc ? e + ': ' + desc : e;
+  }
   async function responseErrorDetail(res) {
     let data = null;
     let text = '';
@@ -78,10 +87,11 @@
     /* FLAT BODIES (xAI): {code:'subscription:free-usage-exhausted', error:"You've used all the included free
        usage…"} carries its sentence IN `error` and its code at the top level. Reading only error.{message,code}
        left providerCode '' and put the raw JSON in front of the user. Object-shaped `error` bodies keep the
-       exact reads below; the flat fallbacks only apply when `error` is a string or absent. */
+       exact reads below; the flat fallbacks only apply when `error` is a string or absent. A top-level `message`
+       still wins over a string `error` — {error:"unauthorized", message:"<sentence>"} is a code token beside
+       the sentence (see flatErrorText). */
     const flat = !(e && typeof e === 'object');
-    const flatText = flat && typeof e === 'string' ? e : '';
-    const message = safeErrorField((e && e.message) || flatText || (data && data.message) || text || res.statusText || ('HTTP ' + res.status), 500);
+    const message = safeErrorField((e && e.message) || (data && data.message) || flatErrorText(data) || text || res.statusText || ('HTTP ' + res.status), 500);
     const type = safeErrorField(e && e.type, 80);
     const code = safeErrorField(flat ? (data ? data.code : undefined) : e.code, 80);
     // OpenRouter places provider identity in metadata; raw metadata is deliberately ignored because it may
@@ -288,9 +298,12 @@
       }
       function* emitFrom(j) {
         if (j.error) {
-          // a flat in-stream error ({error:"<sentence>", code}) keeps its words instead of 'provider stream error'
+          // a flat in-stream error ({error:"<sentence>", code}) keeps its words instead of 'provider stream error',
+          // read with the pre-stream precedence (a top-level `message` beats a string `error` token) and labeled
+          // like the pre-stream error so the UI can tell WHICH provider failed (GROK OAUTH copy keys on the label)
           if (typeof j.error === 'string') {
-            const se = new Error(safeErrorField(j.error, 500) || 'provider stream error');
+            const words = safeErrorField((typeof j.message === 'string' && j.message) || flatErrorText(j), 500);
+            const se = new Error(errLabel + ' stream error: ' + (words || 'unknown'));
             const sc = safeErrorField(j.code, 80);
             if (sc) se.providerCode = sc;
             throw se;

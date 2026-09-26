@@ -499,6 +499,16 @@ module.exports = (async () => {
     try { await collect(p3, { model: 'm', messages: [] }); } catch (e) { err3 = e; }
     A.eq(err3 && err3.providerCode, '', 'object-shaped error bodies keep reading error.code only');
     A.ok(/http 400 - nested wins$/.test(err3 && err3.message), 'object-shaped error bodies keep their exact message');
+    // a string `error` that is only a CODE TOKEN must not hide the sentence beside it (base showed the sentence
+    // for {error, message} and the raw JSON — description included — for OAuth-style {error, error_description})
+    const { responseErrorDetail } = require('../sidecar/providers/openai-compatible.js')._internals;
+    const bodyRes = (obj, status) => new Response(JSON.stringify(obj), { status: status || 401 });
+    const tokMsg = await responseErrorDetail(bodyRes({ error: 'unauthorized', message: 'Your device link expired — re-link this station.' }));
+    A.eq(tokMsg.detail, 'Your device link expired — re-link this station.', 'flat {error:<code>, message:<sentence>}: the top-level message wins over the code token');
+    const tokDesc = await responseErrorDetail(bodyRes({ error: 'invalid_token', error_description: 'The access token expired' }));
+    A.eq(tokDesc.detail, 'invalid_token: The access token expired', 'flat {error, error_description}: the description rides with the token');
+    const xaiFlat = await responseErrorDetail(bodyRes({ code: 'subscription:free-usage-exhausted', error: "You've used all the included free usage" }, 429));
+    A.eq(xaiFlat.detail, "[code subscription:free-usage-exhausted] You've used all the included free usage", "xAI's {code, error:<sentence>} (no message) still reads the sentence");
   }
   // an in-stream flat error keeps its sentence (and code) instead of collapsing to 'provider stream error'
   {
@@ -509,8 +519,25 @@ module.exports = (async () => {
     const p = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://stream.example.test/v1' });
     let err = null;
     try { await collect(p, { model: 'm', messages: [] }); } catch (e) { err = e; }
-    A.eq(err && err.message, "You've used all the included free usage", 'the in-stream string error keeps its text');
+    A.eq(err && err.message, "openai-compatible stream error: You've used all the included free usage", 'the in-stream string error keeps its text, labeled');
     A.eq(err && err.providerCode, 'subscription:free-usage-exhausted', 'and its code');
+    // labeled like the pre-stream error, so the UI can see a GROK OAUTH in-stream failure came from grok
+    const pg = makeOpenAICompatibleProvider({ fetch: fetchImpl, baseUrl: 'https://stream.example.test/v1', label: 'Grok (xAI)' });
+    let errG = null;
+    try { await collect(pg, { model: 'm', messages: [] }); } catch (e) { errG = e; }
+    A.ok(/^Grok \(xAI\) stream error: You've used all the included free usage$/.test(errG && errG.message), 'a labeled adapter names itself on an in-stream error: ' + (errG && errG.message));
+    const { friendlyError } = require('../frontend/app/friendlyerror.js');
+    const fv = friendlyError(errG);
+    A.eq(fv.kind, 'quota_exhausted', 'the labeled grok in-stream spent allowance reads as quota_exhausted in the UI');
+    A.eq(fv.provider, 'grok', 'and carries the grok copy');
+    // in-stream {error:<code>, message:<sentence>}: the sentence wins, as it does pre-stream
+    const pm = makeOpenAICompatibleProvider({ baseUrl: 'https://stream.example.test/v1', fetch: async (url, init) => {
+      if (!init || init.method !== 'POST') return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      return new Response(line({ error: 'overloaded', message: 'The model is at capacity right now' }) + '\n\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    } });
+    let errM = null;
+    try { await collect(pm, { model: 'm', messages: [] }); } catch (e) { errM = e; }
+    A.eq(errM && errM.message, 'openai-compatible stream error: The model is at capacity right now', 'in-stream flat {error, message}: the sentence wins');
   }
 
   // OUTPUT CEILING (issue #17): off by default, on when the profile declares it, explicit req.max_tokens wins,

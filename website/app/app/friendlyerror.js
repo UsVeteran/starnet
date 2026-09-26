@@ -137,9 +137,9 @@
     billing: 'Your Grok subscription reached its usage or spending limit' + GROK_USAGE_FIX,
     client_version: "Grok rejected the Grok CLI client version StarNet presents as out of date — set the STARNET_GROK_CLIENT_VERSION environment variable to a current Grok CLI version and restart StarNet. To keep working now, switch provider in SETTINGS → PROVIDERS."
   };
-  // GROK OAUTH names itself on every failure: "Grok (xAI) http …" from the adapter, "GROK OAUTH: …" from the token
-  // path. A bare model id ("grok-4.7") is NOT that evidence — the XAI API-key provider serves the same models on
-  // pay-per-token credit, where the generic "top it up" line is the right one.
+  // GROK OAUTH names itself on its failures: "Grok (xAI) http …" / "Grok (xAI) stream error: …" from the adapter,
+  // "GROK OAUTH: …" from the token path. A bare model id ("grok-4.7") is NOT that evidence — the XAI API-key
+  // provider serves the same models on pay-per-token credit, where the generic "top it up" line is the right one.
   function isGrokSubscription(low) { return /\bgrok\b(?!-)|supergrok/.test(String(low || '')); }
 
   // the sidecar classifier speaks in `reason`s; map each onto our UI kind. Its whole domain is the PROVIDER
@@ -255,18 +255,29 @@
      "used all the included free usage" (code subscription:free-usage-exhausted) is a spent allowance; its API-key
      "used all available credits … spending limit" is an empty wallet. */
   const QUOTA_EXHAUSTED_RE = /usage[_ ]?limit(?:[_ ]?(?:has|is)(?:[_ ]?been)?)?[_ ]?reached|hit (?:your|the) (?:usage|weekly|monthly|plan|daily) limit|(?:weekly|monthly|daily) (?:quota|limit)|resets? in \s*\d+\s*(?:day|hour|week)|resets? (?:on|at) \d|quota (?:will )?reset(?:s)? (?:in|on|at)|usage[-_ ]?exhausted|used all (?:of )?(?:the |your )?included (?:free )?usage/;
-  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|rpm|tpm|requests per/;
+  const SHORT_WINDOW_RE = /per[- ]?(?:minute|second)|quota metric|\brpm\b|\btpm\b|requests per/;
   const TERMINAL_BILLING_RE = /insufficient[_ ]?quota|exceeded your current quota|out of credit|add credits|payment required|spending limit|used all available credits/;
+  // the xAI allowance wording only — all a 402 may carry and still be quota_exhausted (errorClass.js ALLOWANCE_SPENT_RE):
+  // the full QUOTA_EXHAUSTED_RE's "resets at <digit>" is the 402 rate-window read, which stays rate_limit
+  const ALLOWANCE_SPENT_RE = /usage[-_ ]?exhausted|used all (?:of )?(?:the |your )?included (?:free )?usage/;
+  /* An OAuth TOKEN-ENDPOINT 429 (oauth-device.js / codex-auth.js: "Provider quota exhausted (429). Credentials are
+     still valid; retry after the limit resets."). The sidecar emits it transient:true — a wait fixes it and the
+     sign-in is fine — so it is rate_limit, never the bare /quota/ billing "top it up" line or a RECONNECT door. */
+  const REFRESH_RATE_LIMIT_RE = /provider quota exhausted \(429\)|credentials are still valid/;
+  // 426 Upgrade Required from a non-grok provider: the sidecar's non-retryable format_error, so no ↻ Try again
+  const UPGRADE_REQUIRED_MSG = 'The provider refused this client as out of date (HTTP 426 Upgrade Required) — trying again sends the same request and fails the same way. Update StarNet, or switch provider under SETTINGS → PROVIDERS.';
   // the HTTP status a UI-level error string carries ("… http 429 - …" / "sidecar HTTP 402 — …"), or the explicit arg
   function statusOf(low, status) { return status || (low.match(/\b(?:http|status)\s+(\d{3})\b/) ? Number(RegExp.$1) : null); }
   // a spent allowance, read the way errorClass.js reads it: a Payment Required carrying empty-wallet text is billing
   function isSpentAllowance(low, s) {
-    if (s === 402 && TERMINAL_BILLING_RE.test(low)) return false;
+    if (s === 402) return !TERMINAL_BILLING_RE.test(low) && ALLOWANCE_SPENT_RE.test(low) && !SHORT_WINDOW_RE.test(low);
     return QUOTA_EXHAUSTED_RE.test(low) && !SHORT_WINDOW_RE.test(low);
   }
 
   function kindFromRaw(raw, status) {
     const low = String(raw || '').toLowerCase();
+    // an OAuth token-endpoint 429 (credentials still valid): a wait fixes it — same verdict as friendlyError's ladder
+    if (REFRESH_RATE_LIMIT_RE.test(low)) return 'rate_limit';
     // Harness pre-flight guards ("no API key set" / "no model selected"): a misconfig, not a fault — point at
     // Settings instead of offering a doomed retry. (Match before capdenied, which the em-dash-less strings miss.)
     if (/chatgpt.*sign-?in|sign-?in.*chatgpt|not signed in to chatgpt|codex_not_connected|codex auth|codex_auth|chatgpt subscription.*connect/.test(low)) return 'oauth';
@@ -346,20 +357,28 @@
     let kind = null;
     const st = statusOf(raw.toLowerCase(), status);
     const grokSub = isGrokSubscription(raw.toLowerCase());
+    // a grok METER failure — the sidecar reads 401/403 status-first as auth, so those keep the sign-in heuristics
+    const grokMeter = grokSub && st !== 401 && st !== 403;
     // Managed-credit exhaustion (only emitted when a credits backend is wired) — a UI-level fault the sidecar
     // classifier doesn't model. Catch it before everything else so the CTA points at the STORE, not blind retry.
     if (/managed credit|add credits in the store|out of managed credit/.test(raw.toLowerCase())) {
       kind = 'managed_credit';
+    } else if (REFRESH_RATE_LIMIT_RE.test(raw.toLowerCase())) {
+      // an OAuth token-endpoint 429 ("ChatGPT: …" / "GROK OAUTH: …" / "KIMI OAUTH: …"): retryable, matching the
+      // sidecar's transient:true — before the delegate, whose bare /quota/ read calls it billing
+      kind = 'rate_limit';
     } else
     /* Grok's CLI proxy refusing the client version (426), a spent allowance, or a grok spending limit: all three
        run BEFORE the grok/kimi sign-in heuristics below, because their bodies can say "not available" or "sign
        in" — and a meter or a client version is never fixed by RECONNECT GROK or USE XAI (API KEY). 426 is
-       `unknown` (the sidecar's format_error); the grok copy below replaces its generic line. */
+       `unknown` (the sidecar's format_error); the grok copy below replaces its generic line. Grok-only on
+       purpose: every other provider keeps the delegate's status-first verdict (a 401 saying "limit reached" is
+       auth there, as in errorClass pickReason). */
     if (grokSub && st === 426) {
       kind = 'unknown';
-    } else if (isSpentAllowance(raw.toLowerCase(), st)) {
+    } else if (grokMeter && isSpentAllowance(raw.toLowerCase(), st)) {
       kind = 'quota_exhausted';
-    } else if (grokSub && (st === 402 || TERMINAL_BILLING_RE.test(raw.toLowerCase()))) {
+    } else if (grokMeter && (st === 402 || TERMINAL_BILLING_RE.test(raw.toLowerCase()))) {
       kind = 'billing';
     } else
     // xAI's Grok OAuth device flow can be 403-allowlisted off for an account: the backend says the OAuth surface
@@ -456,6 +475,9 @@
     if (grokSub) {
       const grokMsg = st === 426 ? GROK_COPY.client_version : GROK_COPY[kind];
       if (grokMsg) return { userMessage: grokMsg, kind: kind, retryable: false, action: 'settings', provider: 'grok', raw: raw };
+    }
+    if (st === 426 && kind === 'unknown') {
+      return { userMessage: UPGRADE_REQUIRED_MSG, kind: kind, retryable: false, action: 'settings', raw: raw };
     }
     // transport loss: the ONE kind whose copy names a component, so it is the one kind that owes proof. The
     // measured verdict rides along on `engineAlive` so a diagnostic report can state what was actually probed.

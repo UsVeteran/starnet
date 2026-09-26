@@ -355,6 +355,40 @@ for (const raw of [
     A.ok(refresh.kind !== 'oauth', label + ': a rate-limited token refresh is not a RECONNECT GROK case');
     A.eq(F(new Error('GROK OAUTH sign-in needed: Not signed in to GROK OAUTH — connect it first.')).kind, 'oauth', label + ': a relogin-class failure still is');
     A.eq(F(new Error('Grok (xAI) http 403 - oauth not enabled for this account')).kind, 'grok_oauth_unavailable', label + ': the allowlist 403 keeps its xAI-key door');
+
+    /* an OAuth TOKEN-ENDPOINT 429 is a wait, not a wallet: oauth-device.js / codex-auth.js say "Credentials are still
+       valid; retry after the limit resets" and the sidecar emits transient:true. The bare /quota/ fallback called
+       it billing ("top it up" / grok's Extra Usage line) with no Try again. Pin kind AND copy for every prefix. */
+    for (const pre of ['ChatGPT: Codex provider', 'KIMI OAUTH: Provider', 'GROK OAUTH: Provider']) {
+      const r429 = F(new Error(pre + ' quota exhausted (429). Credentials are still valid; retry after the limit resets.'));
+      A.eq(r429.kind, 'rate_limit', label + ': ' + pre + ' refresh 429 -> rate_limit');
+      A.eq(r429.retryable, true, label + ': ' + pre + ' refresh 429 is retryable (the sidecar says transient)');
+      A.eq(r429.userMessage, KINDS.rate_limit.msg, label + ': ' + pre + ' refresh 429 gets the wait-and-retry copy');
+      A.ok(!/top it up|Extra Usage|sign-in expired/i.test(r429.userMessage), label + ': ' + pre + ' refresh 429 names no wallet or sign-in fix');
+    }
+
+    // the early spent-allowance read is GROK-only: other providers keep the sidecar's status-first verdict
+    A.eq(F(new Error('Anthropic http 401 - daily limit reached')).kind, 'auth', label + ': a non-grok 401 saying "limit reached" stays auth');
+    A.eq(F(new Error('Grok (xAI) http 401 - weekly limit reached')).kind, 'oauth', label + ': a grok 401 stays a sign-in problem, as the sidecar reads it');
+
+    // a 402 rate window with a NUMERIC reset stays retryable rate_limit (only the xAI allowance wording is terminal)
+    for (const body of ['rate limit exceeded, resets at 1767225600', 'Resets at 12:00 UTC']) {
+      const w = F(new Error('openai-compatible http 402 - ' + body));
+      A.eq(w.kind, 'rate_limit', label + ': 402 "' + body + '" -> rate_limit');
+      A.eq(w.retryable, true, label + ': 402 "' + body + '" stays retryable');
+    }
+    A.eq(F(new Error("openai-compatible http 402 - You've used all the included free usage")).kind, 'quota_exhausted', label + ': a 402 xAI allowance body is quota_exhausted');
+
+    // a non-grok 426 is the sidecar's non-retryable format_error: no doomed Try again
+    const up = F(new Error('openai-compatible http 426 - Upgrade Required'));
+    A.eq(up.retryable, false, label + ': a non-grok 426 is not retryable');
+    A.eq(up.action, 'settings', label + ': a non-grok 426 offers the PROVIDERS door');
+    A.ok(/426/.test(up.userMessage) && !/try again\.?$/i.test(up.userMessage), label + ': and says why instead of "try again"');
+
+    // the per-minute veto really matches rpm/tpm as words (it held literal backspace bytes and never fired)
+    const tpm = F(new Error('openai-compatible http 429 - usage exhausted (tpm)'));
+    A.eq(tpm.kind, 'rate_limit', label + ': a 429 "usage exhausted (tpm)" is a per-minute rate limit');
+    A.eq(tpm.retryable, true, label + ': and stays retryable');
   }
 }
 

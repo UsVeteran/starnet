@@ -385,6 +385,10 @@ const F = (err, status, opts) => friendlyError(err, status, opts);
   const perMinute = R(httpErr(429, 'usage exhausted for requests per minute, retry in 10s'));
   A.eq(perMinute.reason, 'rate_limit', 'a PER-MINUTE "usage exhausted" is still rate_limit');
   A.eq(perMinute.retryable, true, 'and still retryable');
+  // SHORT_WINDOW_RE held literal 0x08 bytes where \b was meant, so the rpm/tpm veto could never match
+  A.eq(R(httpErr(429, 'usage exhausted (tpm)')).reason, 'rate_limit', 'a 429 "usage exhausted (tpm)" is per-minute -> rate_limit');
+  A.eq(R(httpErr(429, 'usage limit reached: 60 rpm')).retryable, true, 'a 429 usage limit in rpm stays retryable');
+  A.eq(R(httpErr(429, 'usage limit reached')).reason, 'quota_exhausted', 'without a short-window word it is still quota_exhausted');
 
   // xAI API-key team out of credits / at its spending cap: 429, flat body, BILLING (no wait fixes a wallet)
   const wallet = R(Object.assign(new Error('openai-compatible http 429 - [code Some resource has been exhausted] Your team t-1 has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit.'),
@@ -394,7 +398,12 @@ const F = (err, status, opts) => friendlyError(err, status, opts);
   A.eq(R(httpErr(402, 'spending limit reached for this subscription')).reason, 'billing', '402 spending limit -> billing');
   A.eq(R(httpErr(402, 'monthly spending limit reached; resets at 2026-10-01')).reason, 'billing',
     'a Payment Required spending cap stays billing even when it names a reset date');
-  A.eq(R(httpErr(402, 'rate limit resets at midnight')).reason, 'rate_limit', 'the 402 rate-window read is unchanged');
+  A.eq(R(httpErr(402, 'rate limit resets at midnight')).reason, 'rate_limit', 'the 402 rate-window read is unchanged (word reset)');
+  // …including a NUMERIC reset: the full quota regex's "resets at <digit>" must not flip a 402 rate window terminal
+  A.eq(R(httpErr(402, 'rate limit exceeded, resets at 1767225600')).reason, 'rate_limit', '402 "resets at <epoch>" stays rate_limit');
+  A.eq(R(httpErr(402, 'Resets at 12:00 UTC')).retryable, true, '402 "Resets at 12:00 UTC" stays retryable');
+  A.eq(R(httpErr(402, "You've used all the included free usage for model grok-4.7")).reason, 'quota_exhausted', 'a 402 xAI allowance body is quota_exhausted');
+  A.eq(R(Object.assign(httpErr(402, 'request rejected'), { providerCode: 'subscription:free-usage-exhausted' })).reason, 'quota_exhausted', 'a 402 with the xAI allowance code is quota_exhausted');
   A.eq(R(new Error('Your team has used all available credits')).reason, 'billing', 'status-less credits text -> billing');
 
   // 426 Upgrade Required: the CLI proxy refused the client version. Non-retryable, and NOT auth (no reconnect).
