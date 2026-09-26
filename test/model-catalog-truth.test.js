@@ -45,6 +45,48 @@ module.exports = (async () => {
     A.eq(failed.body.error, failure.message, provider + ' failure carries its error body');
     failure = null;
   }
+  // listModelsForProvider through the REAL registry + adapters (only the network is faked): a profile that documents
+  // `reasoning_effort` fills an undeclared row from the adapter's own per-model efforts, so the dock stops serving
+  // live grok rows as OFF-only; wire-less providers (kimi) are served unchanged; fallback provenance survives.
+  {
+    const factory = require('../sidecar/providers/factory.js');
+    let wire = [], fetchImpl;
+    const liveFetch = async url => new Response(JSON.stringify({ data: wire }), { status: String(url).endsWith('/models') ? 200 : 500 });
+    const failFetch = async () => new Response('forbidden', { status: 403 });
+    const list = vm.runInNewContext(region(backend, 'async function listModelsForProvider(', '\n}\n') + publicBody + '\n({listModelsForProvider,publicModel})', {
+      normalizeProvider: v => factory.normalizeProviderId(v, 'openrouter'),
+      getProviderProfile: factory.getProviderProfile,
+      providerRuntimeBaseUrl: () => '', providerRuntimeKey: () => 'fixture-only',
+      providerRequiresKey: factory.providerRequiresKey, providerRequiresBaseUrl: factory.providerRequiresBaseUrl,
+      providerCredentialError: id => id + ' not configured',
+      providerUsesCodex: factory.providerUsesCodex, providerUsesDeviceOAuth: factory.providerUsesDeviceOAuth,
+      ensureOAuthAccessToken: async () => 'fixture-token', oauthInferenceHeaders: () => ({}),
+      selectProvider: o => factory.selectProvider(Object.assign({}, o, { fetch: fetchImpl })),
+      ImageTask: require('../sidecar/image-task.js'), globalThis: {}
+    });
+    const served = async id => (await list.listModelsForProvider(id, {})).map(list.publicModel);
+    const WIRE = ['none', 'minimal', 'low', 'medium', 'high'];
+    fetchImpl = liveFetch;
+    wire = [{ id: 'grok-4.7' }, { id: 'grok-declared', reasoningEfforts: ['low', 'high'] }];
+    let rows = await served('grok');
+    A.eq(rows[0].reasoningEfforts, WIRE, 'a live grok row without declared efforts carries the adapter\'s wire efforts');
+    A.eq(rows[0].supportsReasoning, false, 'supportsReasoning stays catalog-truthful (unknown → false); the efforts carry the dial');
+    A.eq(rows[0].fallback, false, 'a live grok row is not fallback');
+    A.eq(rows[1].reasoningEfforts, ['low', 'high'], 'declared per-model efforts are never overwritten');
+    wire = [{ id: 'grok-4.3' }];
+    A.eq((await served('xai'))[0].reasoningEfforts, WIRE, 'keyed xai (documents reasoning_effort) gets the same fill');
+    wire = [{ id: 'kimi-for-coding' }];
+    A.eq((await served('kimi'))[0].reasoningEfforts, [], 'kimi (no reasoning_effort wire param) is served unchanged');
+    wire = [{ id: 'gpt-5.5' }];
+    A.eq((await served('openai'))[0].reasoningEfforts, WIRE, 'keyed openai rows expose the efforts its adapter sends');
+    fetchImpl = failFetch;
+    rows = await served('grok');
+    A.eq(rows.map(r => r.id), ['grok-4.7', 'grok-4', 'grok-3', 'grok-code-fast-1'], 'a failed grok /models serves the static roster');
+    A.ok(rows.every(r => r.fallback === true), 'grok seed rows keep fallback provenance through serialization');
+    A.eq(rows[0].reasoningEfforts, WIRE, 'grok seed rows carry the same effort dial');
+    rows = await served('kimi');
+    A.ok(rows.length && rows.every(r => r.fallback === true && r.reasoningEfforts.length === 0), 'kimi seed rows are fallback and effort-less');
+  }
   let payload;
   const browser = vm.runInNewContext(
     region(frontend, '  function normalizeModel(m)', '\n  }\n') +

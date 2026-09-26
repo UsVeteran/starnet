@@ -19875,8 +19875,18 @@ async function listModelsForProvider(providerId, opts) {
   } else {
     provider = selectProvider({ provider: id, fetch: globalThis.fetch, key, baseUrl });
   }
-  const models = await provider.listModels();
-  return models.filter(item => ImageTask.isAgentModel(id, item && item.id));
+  const models = (await provider.listModels()).filter(item => ImageTask.isAgentModel(id, item && item.id));
+  // Reasoning truth for the dock: live openai-compatible rows rarely declare efforts, so publicModel served grok-4.7
+  // as OFF-only and the dock pinned 'none' onto a reasoning model. Where the profile documents `reasoning_effort` on
+  // the wire, fill an undeclared row from the adapter's own per-model list — exactly what its stream() may send.
+  // Profiles without the wire param (kimi, codex, custom…) are served unchanged.
+  if (!profile || profile.wireReasoningEffort !== true || typeof provider.reasoningEfforts !== 'function') return models;
+  return models.map(m => {
+    if (!m || (Array.isArray(m.reasoningEfforts) && m.reasoningEfforts.length)) return m;
+    let efforts = null;
+    try { efforts = provider.reasoningEfforts(m.id); } catch (_) { efforts = null; }
+    return (Array.isArray(efforts) && efforts.length) ? Object.assign({}, m, { reasoningEfforts: efforts.slice() }) : m;
+  });
 }
 
 async function handleProviderModels(req, res) {

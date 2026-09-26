@@ -173,6 +173,8 @@
         // wireStreamOptions:false = endpoint rejects/lacks stream_options (usage streams by default there)
         includeUsage: profile.wireStreamOptions === false ? false : opts.includeUsage,
         staticModels: profile.staticModels,
+        // true = the static roster is an offline seed (rows served as fallback), not the endpoint's real catalog
+        staticModelsFallback: profile.staticModelsFallback === true,
         // prices.js family for endpoints whose /models carries no pricing (null = stays honestly unpriced)
         priceFamily: (typeof profile.priceFamily === 'string') ? profile.priceFamily : null,
         // Local runtimes may need to load a model before returning headers. Hosted providers retain the

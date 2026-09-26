@@ -22,6 +22,8 @@
   //     these providers report usage in the stream by default).
   //   connectTimeoutMs — provider-specific response-header ceiling for endpoints whose cold start can
   //     legitimately exceed the hosted-provider default (local model loading in Ollama).
+  //   staticModelsFallback: true — staticModels is only an offline seed for a live /models (grok/kimi), so
+  //     substituted rows are served `fallback: true`; absent = the static roster IS the catalog (Perplexity).
   const PROFILES = [
     {
       id: 'openrouter',
@@ -117,6 +119,7 @@
       wireReasoningEffort: true,
       // Fallback roster for when the live /models catalog is unreachable (the xAI OAuth surface can 403 an
       // allowlisted-out account). Conservative, tools-only capability; the live catalog always wins when present.
+      staticModelsFallback: true,
       staticModels: [
         { id: 'grok-4.7', name: 'Grok 4.7', context_length: 256000, supportsTools: true, supportsReasoning: true },
         { id: 'grok-4', name: 'Grok 4', context_length: 256000, supportsTools: true, supportsReasoning: true },
@@ -157,6 +160,7 @@
         'X-Msh-Device-Name': 'starnet',
         'X-Msh-Device-Model': 'starnet'
       },
+      staticModelsFallback: true,   // offline seed for the account-discovered live /models (like grok)
       staticModels: [
         { id: 'kimi-for-coding', name: 'Kimi for Coding', context_length: 256000, supportsTools: true, supportsReasoning: false },
         { id: 'kimi-for-coding-highspeed', name: 'Kimi for Coding (Highspeed)', context_length: 256000, supportsTools: true, supportsReasoning: false },

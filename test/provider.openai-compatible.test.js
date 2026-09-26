@@ -344,6 +344,28 @@ module.exports = (async () => {
     const pLive = makeOpenAICompatibleProvider({ fetch: liveFetch, baseUrl: 'http://api/v1', staticModels: statics });
     const fromLive = await pLive.listModels();
     A.eq(fromLive.map(m => m.id).join(','), 'real-model', 'a live catalog always wins over the static roster');
+    A.eq(fromStatic[0].fallback, undefined, 'an authoritative static roster (Perplexity) is a real catalog, not an offline seed');
+
+    // staticModelsFallback (grok/kimi OAuth): the roster only seeds a FAILED live /models, so substituted rows carry
+    // the fallback marker — the probe and the model dock must never read them as a confirmed catalog.
+    const failFetch = async () => new Response('forbidden', { status: 403 });
+    for (const [label, fetch] of [['empty', emptyFetch], ['failed', failFetch]]) {
+      const pSeed = makeOpenAICompatibleProvider({ fetch, baseUrl: 'http://api/v1', staticModels: statics, staticModelsFallback: true });
+      const seeded = await pSeed.listModels();
+      A.eq(seeded.map(m => [m.id, m.fallback]), [['sonar', true]], label + ' live catalog serves the seed roster marked fallback');
+      A.eq(pSeed.contextLimit('sonar'), 128000, label + ' fallback rows still carry context limits');
+    }
+    const pSeedLive = makeOpenAICompatibleProvider({ fetch: liveFetch, baseUrl: 'http://api/v1', staticModels: statics, staticModelsFallback: true });
+    A.eq((await pSeedLive.listModels()).map(m => [m.id, m.fallback]), [['real-model', undefined]], 'live rows never carry the fallback marker');
+
+    // the registry wiring: grok/kimi seed rosters are fallbacks, Perplexity's roster is authoritative
+    const { selectProvider } = require('../sidecar/providers/factory.js');
+    for (const [id, expected] of [['grok', true], ['kimi', true], ['perplexity', undefined]]) {
+      const p = selectProvider({ provider: id, fetch: failFetch, key: 'fixture-only', token: 'fixture-only' });
+      const rows = await p.listModels();
+      A.ok(rows.length > 0, id + ' serves its static roster when /models fails');
+      A.ok(rows.every(m => m.fallback === expected), id + ' static rows fallback=' + expected);
+    }
   }
 
   /* ---- a FAILED boot probe must not become a permanent cache hit ----

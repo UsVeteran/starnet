@@ -179,6 +179,11 @@
     // /v1/models lists Agent-API models, not its chat-completions roster). Used only when the
     // live endpoint yields nothing — a real catalog always wins.
     const staticModels = Array.isArray(opts.staticModels) ? opts.staticModels.map(normalizeModel).filter(Boolean) : [];
+    // staticModelsFallback: the roster is only an OFFLINE seed for an endpoint that HAS a live catalog (grok/kimi
+    // OAuth). Substituted rows then carry `fallback: true` (codex's honesty marker), so the probe and the model dock
+    // never read a failed /models as a confirmed catalog — a confirmed one lets the dock clear a saved model it
+    // doesn't list. Off for an authoritative roster (Perplexity), which stays a real catalog.
+    const staticFallback = opts.staticModelsFallback === true;
     const droppedParams = new Map();   // model -> Set(param) learned from unsupported-param 400s
     let catalog = null;
     let catalogPromise = null;
@@ -445,7 +450,7 @@
       catalog = await catalogPromise;
       if (!catalog.length) {
         catalogPromise = null;
-        if (staticModels.length) catalog = staticModels.slice();
+        if (staticModels.length) catalog = staticFallback ? staticModels.map(m => Object.assign({}, m, { fallback: true })) : staticModels.slice();
       }
       return catalog;
     }
