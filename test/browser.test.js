@@ -110,6 +110,42 @@ function fakeDriver() {
       A.eq(picked.path, fullCandidate.path, 'ordinary headless runs prefer a full Chromium binary over headless-shell');
       A.eq(picked.headless, false, 'the preferred browser retains the full browser surface');
     }
+
+    // Playwright cache layouts: Chrome for Testing revisions (chrome-mac-arm64 / chrome-headless-shell-mac-arm64)
+    // must be found, and the NEWEST revision must win over the last legacy chrome-mac snapshot (chromium-1194
+    // crashes at startup on macOS 27). Numeric ordering: chromium-999 is older than chromium-1000.
+    {
+      const root = path.join('/fake', 'ms-playwright');
+      const listing = ['chromium-1194', 'chromium_headless_shell-1194', 'chromium-1243', 'chromium_headless_shell-1243', 'chromium-999', 'ffmpeg-1011', 'webkit-2359', '.links'];
+      const cands = T.playwrightChromes({ roots: [root], readdir: r => { if (r !== root) throw new Error('ENOENT'); return listing.slice(); }, arch: 'arm64' });
+      const cft = path.join(root, 'chromium-1243', 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing');
+      const cftX64 = path.join(root, 'chromium-1243', 'chrome-mac-x64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing');
+      const legacy = path.join(root, 'chromium-1194', 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+      const oldest = path.join(root, 'chromium-999', 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+      const shell = path.join(root, 'chromium_headless_shell-1243', 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell');
+      const legacyShell = path.join(root, 'chromium_headless_shell-1194', 'chrome-mac', 'headless_shell');
+      const idx = p => cands.findIndex(c => c.path === p);
+      A.ok(idx(cft) >= 0 && cands[idx(cft)].headless === false, 'finder knows the chrome-mac-arm64 Chrome for Testing layout (full browser)');
+      A.ok(idx(shell) >= 0 && cands[idx(shell)].headless === true, 'finder knows the chrome-headless-shell-mac-arm64 layout (headless-only)');
+      A.ok(idx(legacyShell) >= 0 && cands[idx(legacyShell)].headless === true, 'finder knows the legacy chrome-mac/headless_shell layout');
+      A.ok(idx(cft) < idx(cftX64), 'an arm64 host prefers the native arm64 build of a revision over its x64 build');
+      A.ok(idx(cft) < idx(legacy), 'the newest revision (1243) ranks above the legacy chrome-mac snapshot (1194)');
+      A.ok(idx(legacy) < idx(oldest), 'revisions sort numerically, not lexically (1194 above 999)');
+      A.ok(cands.every(c => !/ffmpeg|webkit|\.links/.test(c.path)), 'non-Chromium cache dirs are ignored');
+      const installed = new Set([legacy, cft, shell, legacyShell]);
+      const pick = have => {   // resolveChrome's order (full first, then shell) over the fake candidates
+        for (const c of cands) if (!c.headless && have.has(c.path)) return c;
+        for (const c of cands) if (c.headless && have.has(c.path)) return c;
+        return null;
+      };
+      A.eq(pick(installed).path, cft, 'with 1194 and 1243 both installed the finder resolves to 1243 Chrome for Testing');
+      A.eq(pick(new Set([legacyShell, shell])).path, shell, 'with only headless shells installed the newest shell wins');
+      const x64 = T.playwrightChromes({ roots: [root], readdir: () => listing.slice(), arch: 'x64' });
+      A.ok(x64.findIndex(c => c.path === cftX64) < x64.findIndex(c => c.path === cft), 'an x64 host prefers the x64 build of a revision');
+      const roots2 = ['/fake/a', '/fake/b'];
+      const multi = T.playwrightChromes({ roots: roots2, readdir: r => r === '/fake/a' ? ['chromium-1194'] : ['chromium-1243'], arch: 'arm64' });
+      A.ok(/chromium-1243/.test(multi[0].path), 'the newest revision wins across cache roots, not just within one');
+    }
   }
 
   const driver = fakeDriver();
