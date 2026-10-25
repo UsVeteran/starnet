@@ -1449,5 +1449,14 @@ function fakeDriver() {
     A.ok(noLookup, 'with no resolver wired the guard is inert (rigs/tests keep the old behaviour)');
   }
 
+  {
+    // A temp HOME without a login keychain gets the mock keychain (no "Reset To Defaults" dialog);
+    // a real HOME, and every non-macOS host, launch with no keychain flag at all.
+    const kc = (platform, has) => T.keychainLaunchArgs({ platform, home: '/Users/x', exists: p => has && p === '/Users/x/Library/Keychains/login.keychain-db' });
+    A.eq(kc('darwin', false), ['--use-mock-keychain'], 'macOS temp HOME without a login keychain uses the mock keychain');
+    A.eq(kc('darwin', true), [], 'macOS real HOME keeps the real keychain so saved sign-ins still decrypt');
+    A.eq(kc('linux', false), [], 'non-macOS launches never add the flag');
+  }
+
   A.report('browser.test');
 })();

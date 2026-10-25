@@ -328,6 +328,17 @@
     env = env || process.env;
     return /^(1|true|yes|on)$/i.test(String(env.STARNET_BROWSER_HEADLESS || env.SKYNET_BROWSER_HEADLESS || ''));
   }
+  // macOS: when HOME has no login keychain (test gates and sandboxes run with a temp HOME), Chromium asks
+  // the system for one and the user gets the "Reset To Defaults" keychain dialog on every launch. Use the
+  // mock keychain there only; a real HOME keeps the real keychain so saved StarNet sign-ins stay readable.
+  function keychainLaunchArgs(o) {
+    o = o || {};
+    const platform = o.platform || process.platform;
+    if (platform !== 'darwin') return [];
+    const home = o.home || OS.homedir();
+    const exists = o.exists || FS.existsSync;
+    return exists(P.join(home, 'Library', 'Keychains', 'login.keychain-db')) ? [] : ['--use-mock-keychain'];
+  }
   function playwrightChromes() {
     // ms-playwright caches live under per-user app data with a versioned dir name;
     // scan for them instead of pinning any machine-specific path or revision.
@@ -912,7 +923,7 @@
       launchPort = privatePort ? await allocateEphemeralPort() : cdpPort;
       const args = ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check',
         '--remote-debugging-port=' + launchPort, '--window-size=1440,900',
-        '--user-data-dir=' + profileDir];
+        '--user-data-dir=' + profileDir, ...keychainLaunchArgs()];
       args.push('--lang=' + hostBrowserLocale(deps));
       if (headed) {
         // Visible window the user can watch (and hear — no --mute-audio in headed mode).
@@ -2956,5 +2967,5 @@
     return { tools, session, register(reg) { tools.forEach(t => reg.register(t)); return reg; }, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, CHROME_CANDIDATES } };
   }
 
-  return { makeBrowserTools, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, SETTLE_BOOTSTRAP, SETTLE_PROBE, SETTLE_QUIET_POLLS, describeResponse, jsLiteral, normalizeBrowserLocale, detectBrowserVersion, makeLaunchIdentity, browserVersionFrom, cleanBrandRows, makeCdpIdentity, CHROME_CANDIDATES } };
+  return { makeBrowserTools, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, keychainLaunchArgs, SYNTHETIC_INPUT_BOOTSTRAP, SETTLE_BOOTSTRAP, SETTLE_PROBE, SETTLE_QUIET_POLLS, describeResponse, jsLiteral, normalizeBrowserLocale, detectBrowserVersion, makeLaunchIdentity, browserVersionFrom, cleanBrandRows, makeCdpIdentity, CHROME_CANDIDATES } };
 });
