@@ -328,28 +328,63 @@
     env = env || process.env;
     return /^(1|true|yes|on)$/i.test(String(env.STARNET_BROWSER_HEADLESS || env.SKYNET_BROWSER_HEADLESS || ''));
   }
-  function playwrightChromes() {
+  // Executable sub-paths inside ONE Playwright revision dir. Playwright moved from Chromium snapshots
+  // (chrome-mac/Chromium.app) to Chrome for Testing builds (chrome-mac-arm64|x64/Google Chrome for
+  // Testing.app, chrome-headless-shell-mac-arm64|x64/chrome-headless-shell, chrome-linux64). A finder
+  // that only knew chrome-mac skipped every newer revision and kept launching the last snapshot
+  // (chromium-1194 = Chromium 141), which dies with SIGTRAP at startup on macOS 27. The host's own
+  // architecture is listed first so an arm64 Mac never picks a Rosetta build of the same revision.
+  function playwrightLayouts(arch) {
+    const macArchs = arch === 'arm64' ? ['arm64', 'x64'] : ['x64', 'arm64'];
+    return {
+      full: [
+        ...macArchs.map(a => ['chrome-mac-' + a, 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing']),
+        ['chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'],
+        ['chrome-linux64', 'chrome'],
+        ['chrome-linux', 'chrome'],
+        ['chrome-win64', 'chrome.exe']
+      ],
+      shell: [
+        ...macArchs.map(a => ['chrome-headless-shell-mac-' + a, 'chrome-headless-shell']),
+        ['chrome-mac', 'headless_shell'],
+        ['chrome-headless-shell-linux64', 'chrome-headless-shell'],
+        ['chrome-headless-shell-linux', 'headless_shell'],
+        ['chrome-headless-shell-win64', 'chrome-headless-shell.exe']
+      ]
+    };
+  }
+  function playwrightChromes(opts) {
     // ms-playwright caches live under per-user app data with a versioned dir name;
     // scan for them instead of pinning any machine-specific path or revision.
     // Each candidate is tagged headless:true when it is a chrome-headless-shell build
     // (those CANNOT run headed — a headed launch must skip them).
-    const roots = [];
-    if (process.env.LOCALAPPDATA) roots.push(P.join(process.env.LOCALAPPDATA, 'ms-playwright'));
-    roots.push(P.join(OS.homedir(), '.cache', 'ms-playwright'));
-    roots.push(P.join(OS.homedir(), 'Library', 'Caches', 'ms-playwright'));
-    const out = [];
-    for (const root of roots) {
+    // Revisions are ordered NEWEST FIRST by their numeric suffix across every root (a plain string
+    // sort ranks chromium-999 above chromium-1000), so the newest installed build wins and an old,
+    // broken one is only a fallback when nothing newer exists.
+    opts = opts || {};
+    const readdir = opts.readdir || FS.readdirSync;
+    let roots = opts.roots;
+    if (!roots) {
+      roots = [];
+      if (process.env.LOCALAPPDATA) roots.push(P.join(process.env.LOCALAPPDATA, 'ms-playwright'));
+      roots.push(P.join(OS.homedir(), '.cache', 'ms-playwright'));
+      roots.push(P.join(OS.homedir(), 'Library', 'Caches', 'ms-playwright'));
+    }
+    const layouts = playwrightLayouts(opts.arch || process.arch);
+    const builds = [];
+    roots.forEach((root, rootIndex) => {
       let dirs = [];
-      try { dirs = FS.readdirSync(root); } catch (_) { continue; }
-      for (const d of dirs.sort().reverse()) {
-        if (/^chromium_headless_shell-\d+$/.test(d)) {
-          out.push({ path: P.join(root, d, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe'), headless: true });
-          out.push({ path: P.join(root, d, 'chrome-headless-shell-linux', 'headless_shell'), headless: true });
-        } else if (/^chromium-\d+$/.test(d)) {
-          out.push({ path: P.join(root, d, 'chrome-win64', 'chrome.exe'), headless: false });
-          out.push({ path: P.join(root, d, 'chrome-linux', 'chrome'), headless: false });
-          out.push({ path: P.join(root, d, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'), headless: false });
-        }
+      try { dirs = readdir(root); } catch (_) { return; }
+      for (const d of dirs) {
+        const m = /^(chromium|chromium_headless_shell)-(\d+)$/.exec(String(d));
+        if (m) builds.push({ root, rootIndex, dir: String(d), rev: Number(m[2]), headless: m[1] !== 'chromium' });
+      }
+    });
+    builds.sort((a, b) => (b.rev - a.rev) || (a.rootIndex - b.rootIndex));
+    const out = [];
+    for (const b of builds) {
+      for (const parts of (b.headless ? layouts.shell : layouts.full)) {
+        out.push({ path: P.join(b.root, b.dir, ...parts), headless: b.headless });
       }
     }
     return out;
@@ -2956,5 +2991,5 @@
     return { tools, session, register(reg) { tools.forEach(t => reg.register(t)); return reg; }, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, CHROME_CANDIDATES } };
   }
 
-  return { makeBrowserTools, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, SETTLE_BOOTSTRAP, SETTLE_PROBE, SETTLE_QUIET_POLLS, describeResponse, jsLiteral, normalizeBrowserLocale, detectBrowserVersion, makeLaunchIdentity, browserVersionFrom, cleanBrandRows, makeCdpIdentity, CHROME_CANDIDATES } };
+  return { makeBrowserTools, _internals: { assertSafeUrl, assertLoopbackUrl, assertResolvedSafe, isPrivateV4, isPrivateV6, makeBrowserSession, makeCdpDriver, makeDownloadLedger, findChrome, resolveChrome, playwrightChromes, headlessRequested, SYNTHETIC_INPUT_BOOTSTRAP, SETTLE_BOOTSTRAP, SETTLE_PROBE, SETTLE_QUIET_POLLS, describeResponse, jsLiteral, normalizeBrowserLocale, detectBrowserVersion, makeLaunchIdentity, browserVersionFrom, cleanBrandRows, makeCdpIdentity, CHROME_CANDIDATES } };
 });
